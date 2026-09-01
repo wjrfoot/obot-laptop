@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -e
+
+export ROS_DOMAIN_ID=5
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI=file://$HOME/cyclonedds_wifi.xml
+
+source /opt/ros/jazzy/setup.bash
+source "$HOME/Workspaces/obot_ws/install/setup.bash"
+
+MAP_DIR="$HOME/Workspaces/obot_ws/maps"
+mkdir -p "$MAP_DIR"
+
+if [ $# -ge 1 ]; then
+    MAP_NAME="$1"
+else
+    MAP_NAME="obot_map_$(date +%Y%m%d_%H%M%S)"
+fi
+
+MAP_PATH="$MAP_DIR/$MAP_NAME"
+
+echo "Saving map as:"
+echo "  $MAP_PATH.yaml"
+echo "  $MAP_PATH.pgm"
+echo
+
+ros2 run nav2_map_server map_saver_cli \
+    -f "$MAP_PATH"
+
+echo
+echo "Map saved."
+echo "AMCL map file:"
+echo "  $MAP_PATH.yaml"

@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -e
+
+export ROS_DOMAIN_ID=5
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI=file://$HOME/cyclonedds_wifi.xml
+
+source /opt/ros/jazzy/setup.bash
+source "$HOME/Workspaces/obot_ws/install/setup.bash"
+
+echo "=== OBOT SLAM + NAV2 STARTUP ==="
+
+if ros2 node list 2>/dev/null | grep -qx '/slam_toolbox'; then
+    echo "ERROR: /slam_toolbox is already running."
+    echo "Stop the existing SLAM instance before starting obot-slamnav."
+    exit 1
+fi
+
+if ros2 node list 2>/dev/null | grep -qx '/controller_server'; then
+    echo "ERROR: Nav2 already appears to be running."
+    echo "Stop the existing Nav2 instance before starting obot-slamnav."
+    exit 1
+fi
+
+cleanup()
+{
+    echo
+    echo "Stopping OBot SLAM/Nav2..."
+
+    if [ -n "${NAV_PID:-}" ]; then
+        kill -INT "$NAV_PID" 2>/dev/null || true
+        wait "$NAV_PID" 2>/dev/null || true
+    fi
+
+    if [ -n "${SLAM_PID:-}" ]; then
+        kill -INT "$SLAM_PID" 2>/dev/null || true
+        wait "$SLAM_PID" 2>/dev/null || true
+    fi
+}
+
+trap cleanup EXIT INT TERM
+
+echo
+echo "Starting SLAM Toolbox..."
+ros2 launch obot_bringup obot_slam.launch.py &
+SLAM_PID=$!
+
+echo "Waiting for SLAM to become active..."
+
+for i in $(seq 1 20); do
+    if ros2 lifecycle get /slam_toolbox 2>/dev/null | grep -q 'active'; then
+        echo "SLAM Toolbox is active."
+        break
+    fi
+
+    if ! kill -0 "$SLAM_PID" 2>/dev/null; then
+        echo "ERROR: SLAM process exited during startup."
+        exit 1
+    fi
+
+    sleep 1
+done
+
+if ! ros2 lifecycle get /slam_toolbox 2>/dev/null | grep -q 'active'; then
+    echo "ERROR: SLAM Toolbox did not become active."
+    exit 1
+fi
+
+echo
+echo "Starting Nav2..."
+ros2 launch obot_bringup obot_nav2.launch.py &
+NAV_PID=$!
+
+echo
+echo "OBot SLAM + Nav2 are running."
+echo "Press Ctrl-C to stop both."
+
+wait "$NAV_PID"

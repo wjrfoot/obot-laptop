@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+
+HOST="${1:-pi-bot-1.local}"
+OUT="$HOME/battery_tests/pi_$(date +%Y%m%d_%H%M%S).csv"
+
+mkdir -p "$HOME/battery_tests"
+
+echo "timestamp,epoch,reachable" > "$OUT"
+
+echo "Monitoring OBot at $HOST"
+echo "Logging to:"
+echo "  $OUT"
+echo "Press Ctrl-C to stop."
+
+while true; do
+    TS=$(date --iso-8601=seconds)
+    EPOCH=$(date +%s.%N)
+
+    if ping -c 1 -W 1 "$HOST" >/dev/null 2>&1; then
+        UP=1
+    else
+        UP=0
+    fi
+
+    echo "$TS,$EPOCH,$UP" >> "$OUT"
+    sleep 1
+done

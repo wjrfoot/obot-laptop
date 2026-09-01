@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -e
+
+export ROS_DOMAIN_ID=5
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI=file://$HOME/cyclonedds_wifi.xml
+
+source /opt/ros/jazzy/setup.bash
+source "$HOME/Workspaces/obot_ws/install/setup.bash"
+
+MAP_FILE="${1:-$HOME/Workspaces/obot_ws/maps/lab_test.yaml}"
+
+echo "=== OBOT LOCALIZATION + NAV2 STARTUP ==="
+echo "Map: $MAP_FILE"
+
+if [ ! -f "$MAP_FILE" ]; then
+    echo "ERROR: map file not found:"
+    echo "  $MAP_FILE"
+    exit 1
+fi
+
+if ros2 node list 2>/dev/null | grep -qx '/slam_toolbox'; then
+    echo "ERROR: SLAM Toolbox is running."
+    echo "Stop obot-slamnav before starting fixed-map localization."
+    exit 1
+fi
+
+if ros2 node list 2>/dev/null | grep -Eq '^/(amcl|map_server|controller_server)$'; then
+    echo "ERROR: localization or Nav2 nodes already appear to be running."
+    exit 1
+fi
+
+cleanup()
+{
+    echo
+    echo "Stopping OBot localization/Nav2..."
+
+    if [ -n "${NAV_PID:-}" ]; then
+        kill -INT "$NAV_PID" 2>/dev/null || true
+        wait "$NAV_PID" 2>/dev/null || true
+    fi
+
+    if [ -n "${LOC_PID:-}" ]; then
+        kill -INT "$LOC_PID" 2>/dev/null || true
+        wait "$LOC_PID" 2>/dev/null || true
+    fi
+}
+
+trap cleanup EXIT INT TERM
+
+echo
+echo "Starting map_server + AMCL..."
+ros2 launch obot_bringup obot_localization.launch.py \
+    map:="$MAP_FILE" &
+LOC_PID=$!
+
+echo "Waiting for AMCL and map_server..."
+
+for i in $(seq 1 20); do
+    MAP_STATE=$(ros2 lifecycle get /map_server 2>/dev/null || true)
+    AMCL_STATE=$(ros2 lifecycle get /amcl 2>/dev/null || true)
+
+    if echo "$MAP_STATE" | grep -q 'active' && \
+       echo "$AMCL_STATE" | grep -q 'active'; then
+        echo "Localization stack is active."
+        break
+    fi
+
+    if ! kill -0 "$LOC_PID" 2>/dev/null; then
+        echo "ERROR: localization launch exited during startup."
+        exit 1
+    fi
+
+    sleep 1
+done
+
+if ! ros2 lifecycle get /amcl 2>/dev/null | grep -q 'active'; then
+    echo "ERROR: AMCL did not become active."
+    exit 1
+fi
+
+echo
+echo "Starting Nav2..."
+ros2 launch obot_bringup obot_nav2.launch.py &
+NAV_PID=$!
+
+echo
+echo "OBot fixed-map localization + Nav2 are running."
+echo
+echo "IMPORTANT:"
+echo "  1. In RViz, use 2D Pose Estimate."
+echo "  2. Verify the live laser aligns with the saved map."
+echo "  3. Do not send a Nav2 goal until localization looks correct."
+echo
+echo "Press Ctrl-C to stop localization and Nav2."
+
+wait "$NAV_PID"

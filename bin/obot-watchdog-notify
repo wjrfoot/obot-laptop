@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -e
+
+export ROS_DOMAIN_ID=5
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI=file://$HOME/cyclonedds_wifi.xml
+
+source /opt/ros/jazzy/setup.bash
+
+exec python3 - <<'PY'
+import subprocess
+
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import String
+
+
+class WatchdogNotifier(Node):
+    def __init__(self):
+        super().__init__('obot_watchdog_notifier')
+
+        self.sub = self.create_subscription(
+            String,
+            '/obot/watchdog_event',
+            self.notify,
+            10
+        )
+
+        self.get_logger().info(
+            'Listening for OBot watchdog events'
+        )
+
+    def notify(self, msg):
+        self.get_logger().info(
+            f'Watchdog event: {msg.data}'
+        )
+
+        subprocess.run(
+            [
+                'notify-send',
+                '-u', 'critical',
+                'OBot Watchdog',
+                msg.data
+            ],
+            check=False
+        )
+
+
+def main():
+    rclpy.init()
+    node = WatchdogNotifier()
+
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+main()
+PY

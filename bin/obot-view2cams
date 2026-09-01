@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -e
+
+source /opt/ros/jazzy/setup.bash
+source "$HOME/Workspaces/obot_ws/install/setup.bash"
+
+exec ros2 run obot view2cams
