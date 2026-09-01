@@ -1,0 +1,28 @@
+# ROS / colcon generated directories
+build/
+install/
+log/
+
+# Generated directories accidentally created inside packages
+**/build/
+**/install/
+**/log/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Backup/editor files
+*.bak
+*.old
+*.bk*
+*~
+*.swp
+
+# PlatformIO generated files
+.pio/
+.vscode/
+
+# Miscellaneous
+.DS_Store
