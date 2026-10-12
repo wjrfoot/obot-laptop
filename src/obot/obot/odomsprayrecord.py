@@ -3,7 +3,7 @@
 L2 opens a new file named odom<timestamp>.txt in the output directory and R2
 closes it. While a file is open, each press of a spray button with a duration
 > 0 appends one line: x y yaw spray_sec. The pose is expressed relative to the
-odom pose at the moment the file was opened (x forward, y left, yaw in radians).
+odom pose at the moment the file was opened (x forward, y left, yaw in degrees).
 """
 import math
 import os
@@ -98,7 +98,7 @@ class OdomSprayRecord(Node):
             self.get_logger().error(f'Cannot open record file: {exc}')
             return
         self.origin = self.pose
-        self.file.write('# x_m y_m yaw_rad spray_sec (relative to start pose)\n')
+        self.file.write('# x_m y_m yaw_deg spray_sec (relative to start pose)\n')
         self.file.flush()
         self.get_logger().info(f'Recording to {path}')
 
@@ -117,8 +117,8 @@ class OdomSprayRecord(Node):
         c, s = math.cos(oyaw), math.sin(oyaw)
         rel_x = c * dx + s * dy
         rel_y = -s * dx + c * dy
-        rel_yaw = wrap_angle(yaw - oyaw)
-        self.file.write(f'{rel_x:.3f} {rel_y:.3f} {rel_yaw:.3f} {duration:.2f}\n')
+        rel_yaw = math.degrees(wrap_angle(yaw - oyaw))
+        self.file.write(f'{rel_x:.3f} {rel_y:.3f} {rel_yaw:.1f} {duration:.2f}\n')
         self.file.flush()
 
     def destroy_node(self):
