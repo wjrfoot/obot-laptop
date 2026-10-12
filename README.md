@@ -90,6 +90,18 @@ command to `/spray/valve_command`; a button whose duration is 0 (the default) is
 
 Arguments: `cross_spray_sec`, `circle_spray_sec`, `triangle_spray_sec`, `square_spray_sec`.
 
+### Session recording (odomsprayrecord)
+
+`odomsprayrecord` logs spray events to a text file per session. L2 opens a new
+`odom<YYYYmmdd_HHMMSS>.txt` in `output_dir` and R2 closes it. While open, each press of an
+enabled spray button (duration > 0) appends a line `x y yaw spray_sec`, with the pose relative to
+the odom pose when the file was opened (metres, radians).
+
+    ros2 launch obot odomsprayrecord.launch.py output_dir:=~/odom_records cross_spray_sec:=2.0
+
+Arguments: `output_dir`, `odom_topic` (default `/diff_drive_controller/odom`), `joy_topic`, and
+the four `*_spray_sec` values (keep them the same as for `obot_teleop.launch.py`).
+
 ## Build
 
     cd ~/Workspaces/obot_ws
