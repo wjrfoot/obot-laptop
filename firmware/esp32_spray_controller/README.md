@@ -38,13 +38,13 @@ together out of the box (as long as the topic names match).
 ## Setup
 
 1. Edit `include/config.h`:
-   - `WIFI_SSID` / `WIFI_PASSWORD`
-   - `AGENT_IP` / `AGENT_PORT` — the machine running `micro_ros_agent`
+   - `WIFI_NETWORKS` — SSID, password and agent IP per network; tried in order
+   - `AGENT_PORT` — port of the machine running `micro_ros_agent`
    - `VALVE_RELAY_PIN` / `VALVE_ACTIVE_HIGH` if your wiring differs
 2. Run the micro-ROS agent (matching the `board_microros_distro` in
    `platformio.ini`, currently `jazzy`):
    ```
-   ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888
+   ros2 launch obot micro_ros_agent.launch.py
    ```
 3. Build and flash with PlatformIO:
    ```

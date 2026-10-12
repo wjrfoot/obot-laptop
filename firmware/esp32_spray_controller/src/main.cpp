@@ -206,6 +206,32 @@ static void destroy_entities() {
   rclc_support_fini(&support);
 }
 
+// Cycles through WIFI_NETWORKS until one connects, then configures micro-ROS for it.
+static void connect_wifi_and_set_transport() {
+  const size_t count = sizeof(WIFI_NETWORKS) / sizeof(WIFI_NETWORKS[0]);
+  WiFi.mode(WIFI_STA);
+  while (true) {
+    for (size_t i = 0; i < count; i++) {
+      const WifiNetwork &net = WIFI_NETWORKS[i];
+      Serial.printf("WiFi: trying %s\n", net.ssid);
+      WiFi.disconnect();
+      WiFi.begin(net.ssid, net.password);
+      const uint32_t start = millis();
+      while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
+        delay(250);
+      }
+      if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("WiFi: connected to %s, ip %s, agent %s\n", net.ssid,
+                      WiFi.localIP().toString().c_str(), net.agent_ip);
+        IPAddress agent_ip;
+        agent_ip.fromString(net.agent_ip);
+        set_microros_wifi_transports((char *)net.ssid, (char *)net.password, agent_ip, AGENT_PORT);
+        return;
+      }
+    }
+  }
+}
+
 void setup() {
   Serial.begin(115200);
 
@@ -216,10 +242,7 @@ void setup() {
 
   Serial.println("ESP32 spray controller starting");
 
-  IPAddress agent_ip;
-  agent_ip.fromString(AGENT_IP);
-  set_microros_wifi_transports((char *)WIFI_SSID, (char *)WIFI_PASSWORD, agent_ip, AGENT_PORT);
-
+  connect_wifi_and_set_transport();
 }
 
 void loop() {

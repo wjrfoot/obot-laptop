@@ -1,11 +1,15 @@
 #pragma once
 
 // ---- WiFi / micro-ROS agent -----------------------------------------------
-#define WIFI_SSID       "YOUR_WIFI_SSID"
-#define WIFI_PASSWORD   "YOUR_WIFI_PASSWORD"
+// Networks are tried in order until one connects. Each has the IP of the
+// machine running micro_ros_agent on that network.
+struct WifiNetwork { const char *ssid; const char *password; const char *agent_ip; };
+static const WifiNetwork WIFI_NETWORKS[] = {
+  {"YOUR_WIFI_SSID_1", "YOUR_WIFI_PASSWORD_1", "192.168.0.52"},
+  {"YOUR_WIFI_SSID_2", "YOUR_WIFI_PASSWORD_2", "192.168.0.52"},
+};
+#define WIFI_CONNECT_TIMEOUT_MS 15000
 
-// IP address of the micro-ROS agent.
-#define AGENT_IP        "192.168.1.100"
 #define AGENT_PORT      8888
 
 #define ROS_NODE_NAME      "esp32_spray_controller"

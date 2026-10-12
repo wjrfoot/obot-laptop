@@ -19,6 +19,7 @@ This repository contains the laptop-side portion of the SprayBot/OBot system. Ro
 - `src/obot_description` — OBot URDF/Xacro and visualization configuration
 - `src/obot_msgs` — OBot-specific ROS messages
 - `firmware/cyd_spray_controller` — ESP32/CYD spray-controller and status-display firmware
+- `firmware/esp32_spray_controller` — headless ESP32-WROOM-32 spray-valve controller firmware
 - `maps` — saved SLAM maps
 - `bin` — OBot operator, diagnostic, mapping, and test utilities
 - `config/laptop` — portable laptop configuration templates
@@ -64,6 +65,30 @@ as the template for creating the local:
 `firmware/cyd_spray_controller/include/config.h`
 
 The CYD participates in the ROS 2 system through micro-ROS and provides status display and spray-valve control functionality.
+
+## ESP32 Spray Controller (headless)
+
+Firmware: `firmware/esp32_spray_controller`
+
+Copy `include/config.example.h` to `include/config.h` (excluded from Git) and set, for each
+network in `WIFI_NETWORKS`, the SSID, password, and the IP of the laptop running the agent. The
+board tries the networks in order until one connects. Build and flash with
+`pio run -e esp32-wroom32 -t upload`.
+
+Start the micro-ROS agent on the laptop (UDP port 8888, `ROS_DOMAIN_ID=5`):
+
+    ros2 launch obot micro_ros_agent.launch.py
+
+Optional arguments: `port:=8888 domain_id:=5`.
+
+### PS4 spray buttons
+
+`obot_teleop.launch.py` also starts `joy_spray_node`. Each face button publishes a timed
+command to `/spray/valve_command`; a button whose duration is 0 (the default) is disabled:
+
+    ros2 launch obot obot_teleop.launch.py cross_spray_sec:=2.0 circle_spray_sec:=0.5
+
+Arguments: `cross_spray_sec`, `circle_spray_sec`, `triangle_spray_sec`, `square_spray_sec`.
 
 ## Build
 

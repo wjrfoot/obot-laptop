@@ -45,6 +45,7 @@ setup(
             'wifi_area_surveyor = obot.wifi_area_surveyor:main',
             'view2cams = obot.dual_compressed_viewer:main',
             'view3cams = obot.triple_compressed_viewer:main',
+            'joy_spray_node = obot.joy_spray_node:main',
             'spray_mission_console = obot.spray_mission_console:main',
         ],
     },

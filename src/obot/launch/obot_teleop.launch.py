@@ -64,6 +64,12 @@ def generate_launch_description():
             default_value="0.50",
         ),
 
+        # Spray seconds per PS4 face button; 0 disables the button.
+        DeclareLaunchArgument("cross_spray_sec", default_value="0.0"),
+        DeclareLaunchArgument("circle_spray_sec", default_value="0.0"),
+        DeclareLaunchArgument("triangle_spray_sec", default_value="0.0"),
+        DeclareLaunchArgument("square_spray_sec", default_value="0.0"),
+
         # PS4 joystick driver
         Node(
             package="joy",
@@ -108,6 +114,22 @@ def generate_launch_description():
                 "low_speed_scale": low_speed_scale,
                 "slow_mode_scale": slow_mode_scale,
                 "single_stick_low_speed_scale": single_stick_low_speed_scale,
+            }],
+        ),
+
+        # PS4 face buttons -> timed spray valve commands. A button with a
+        # duration of 0 is disabled; set e.g. cross_duration_sec to enable it.
+        Node(
+            package="obot",
+            executable="joy_spray_node",
+            name="joy_spray_node",
+            output="screen",
+            parameters=[{
+                "joy_topic": joy_topic,
+                "cross_duration_sec": LaunchConfiguration("cross_spray_sec"),
+                "circle_duration_sec": LaunchConfiguration("circle_spray_sec"),
+                "triangle_duration_sec": LaunchConfiguration("triangle_spray_sec"),
+                "square_duration_sec": LaunchConfiguration("square_spray_sec"),
             }],
         ),
 
