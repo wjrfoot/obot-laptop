@@ -26,8 +26,12 @@ float32[2] bus_voltage_session_max_v
 float32[2] bus_voltage_alltime_min_v
 float32[2] bus_voltage_alltime_max_v
 float32[2] controller_temp_c   # NaN if not reported
-uint32[2] active_errors        # raw ODrive error bits
-uint32[2] disarm_reason        # raw ODrive disarm reason bits
+# Raw ODrive S1 ODrive.Error bit masks (decoded by the Pi and in the fault log).
+# active_errors: Get_Error Active_Errors if fresh, else heartbeat Axis_Error (which is
+#   active|disarm combined). disarm_reason: Get_Error Disarm_Reason, or 0xFFFFFFFF when
+#   not observed (Get_Error is not cyclic by default; the node never requests it).
+uint32[2] active_errors
+uint32[2] disarm_reason
 uint16[2] fault_count          # persistent, per controller
 builtin_interfaces/Time[2] last_fault_stamp   # sec = 0 if none
 
