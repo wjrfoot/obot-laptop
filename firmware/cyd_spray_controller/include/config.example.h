@@ -8,11 +8,11 @@
 #define AGENT_IP        "192.168.1.100"
 #define AGENT_PORT      8888
 
-#define ROS_NODE_NAME      "cyd_spray_controller"
+#define ROS_NODE_NAME      "esp32_spray_controller"
 #define ROS_NODE_NAMESPACE ""
 
 // ---- GPIO ------------------------------------------------------------------
-#define VALVE_RELAY_PIN   22
+#define VALVE_RELAY_PIN   27
 #define VALVE_ACTIVE_HIGH 1
 
 // ---- Topics ----------------------------------------------------------------

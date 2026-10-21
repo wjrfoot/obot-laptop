@@ -19,6 +19,7 @@ This repository contains the laptop-side portion of the SprayBot/OBot system. Ro
 - `src/obot_description` — OBot URDF/Xacro and visualization configuration
 - `src/obot_msgs` — OBot-specific ROS messages
 - `firmware/cyd_spray_controller` — ESP32/CYD spray-controller and status-display firmware
+- `firmware/obot_cyd_status` — CYD status/diagnostics display (scaffold; see `doc/OBot_CYD_Interfaces.md`)
 - `firmware/esp32_spray_controller` — headless ESP32-WROOM-32 spray-valve controller firmware
 - `maps` — saved SLAM maps
 - `bin` — OBot operator, diagnostic, mapping, and test utilities

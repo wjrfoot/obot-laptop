@@ -1,10 +1,10 @@
-# CYD spray controller firmware
+# ESP32 spray controller firmware
 
-PlatformIO firmware for an ESP32-2432S028R "Cheap Yellow Display" (CYD) board
-used as:
+PlatformIO firmware for a generic ESP32-WROOM-32 development board used as a
+headless spray valve controller. It provides:
 
-1. A status display for the robot: CAN bus health and controller-active state.
-2. A GPIO-driven spray valve solenoid controller (via relay/MOSFET).
+1. A GPIO-driven spray valve controller (via a relay/MOSFET module).
+2. Status logging over USB serial.
 
 It joins ROS 2 as a micro-ROS node over WiFi/UDP, talking to a micro-ROS agent
 running on the PC/robot computer.
@@ -13,8 +13,8 @@ running on the PC/robot computer.
 
 | Topic                       | Type              | Direction | Purpose                                   |
 |------------------------------|-------------------|-----------|--------------------------------------------|
-| `/status/can_bus_healthy`     | `std_msgs/Bool`   | sub       | CAN bus status tile                        |
-| `/status/controller_active`   | `std_msgs/Bool`   | sub       | Controller-active status tile              |
+| `/status/can_bus_healthy`     | `std_msgs/Bool`   | sub       | CAN bus status logging                     |
+| `/status/controller_active`   | `std_msgs/Bool`   | sub       | Controller-active status logging           |
 | `/spray/valve_command`        | `std_msgs/Float32`| sub       | Duration (s) to hold the valve open; `<=0` closes it immediately |
 | `/spray/valve_state`          | `std_msgs/Bool`   | pub       | Current valve open/closed feedback         |
 
@@ -24,13 +24,16 @@ together out of the box (as long as the topic names match).
 
 ## Hardware notes
 
-- Target board: ESP32-2432S028R (ILI9341 240x320 SPI display, resistive touch
-  not used yet). Pin mapping is set via `build_flags` in `platformio.ini`
-  (TFT_eSPI "no-config" build) — adjust if your CYD variant wires the panel
-  differently, or if colors look inverted (`-DTFT_INVERSION_ON=1`).
-- The valve relay/MOSFET signal is driven from `VALVE_RELAY_PIN` (default
-  GPIO 22) in `include/config.h`. Set `VALVE_ACTIVE_HIGH` to `0` for
-  active-low relay modules.
+- Target board: ESP32-WROOM-32 development board (`esp32dev` PlatformIO target).
+- The relay/MOSFET control signal is driven from `VALVE_RELAY_PIN` (default
+   GPIO 27) in `include/config.h`. Set `VALVE_ACTIVE_HIGH` to `0` for
+   active-low modules. GPIO output is 3.3 V; verify the module recognizes this
+   signal level. Do not drive a valve directly from an ESP32 GPIO.
+- Connect the controller ground to the relay module control ground unless its
+   input is electrically isolated. Power the module from a supply at the
+   module's rated voltage; verify the carrier-board VIN voltage before using it.
+- The reported `/spray/valve_state` is the commanded GPIO state, not physical
+   valve-position feedback.
 
 ## Setup
 
@@ -45,11 +48,10 @@ together out of the box (as long as the topic names match).
    ```
 3. Build and flash with PlatformIO:
    ```
-   pio run -t upload
+   pio run -e esp32-wroom32 -t upload
    pio device monitor
    ```
 
-## Future work
-
-Touch input (XPT2046) is not wired up yet; it's reserved for manual on-screen
-control of the valve and other future inputs.
+The firmware closes the valve when its requested duration expires or the
+micro-ROS agent disconnects. If the firmware encounters a fatal micro-ROS
+error, it also drives the output to the configured closed state.
