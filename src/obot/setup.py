@@ -48,6 +48,7 @@ setup(
             'joy_spray_node = obot.joy_spray_node:main',
             'odomsprayrecord = obot.odomsprayrecord:main',
             'spray_mission_console = obot.spray_mission_console:main',
+            'odrive_bus_voltage_node = obot.odrive_bus_voltage_node:main',
         ],
     },
 )
