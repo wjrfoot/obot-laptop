@@ -1,0 +1,16 @@
+[Unit]
+Description=OBot Drive Watchdog
+
+[Service]
+Type=simple
+
+Environment=ROS_DOMAIN_ID=5
+Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+Environment=CYCLONEDDS_URI=file:///home/pi/obot_ws/src/obot_bringup/config/cyclonedds_wifi.xml
+
+ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash && exec /home/pi/bin/obot-watchdog'
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
