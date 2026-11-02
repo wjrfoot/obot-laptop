@@ -35,11 +35,23 @@ class WatchdogNotifier(Node):
             f'Watchdog event: {msg.data}'
         )
 
+        # Watchdogs that tag events as "[LEVEL] text" get matching urgency.
+        # Untagged events (OBot-1 watchdog) keep the original critical urgency.
+        urgency = 'critical'
+        title = 'OBot Watchdog'
+        if msg.data.startswith('[INFO] '):
+            urgency = 'normal'
+        elif msg.data.startswith('[WARNING] '):
+            urgency = 'normal'
+            title = 'OBot Watchdog WARNING'
+        elif msg.data.startswith('[CRITICAL] '):
+            title = 'OBot Watchdog CRITICAL'
+
         subprocess.run(
             [
                 'notify-send',
-                '-u', 'critical',
-                'OBot Watchdog',
+                '-u', urgency,
+                title,
                 msg.data
             ],
             check=False
