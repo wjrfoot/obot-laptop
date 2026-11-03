@@ -41,7 +41,9 @@ def generate_launch_description():
         DeclareLaunchArgument("right_axis", default_value="4"),
         DeclareLaunchArgument("invert_left", default_value="false"),
         DeclareLaunchArgument("invert_right", default_value="false"),
-        DeclareLaunchArgument("deadband", default_value="0.20"),
+        # Non-proportional sticks: above this fraction of travel
+        # is full on, below is off.
+        DeclareLaunchArgument("deadband", default_value="0.50"),
 
         # OBot calibrated drivetrain geometry.
         DeclareLaunchArgument("track_width", default_value="0.486"),
@@ -55,7 +57,8 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_axis_threshold", default_value="0.5"),
         DeclareLaunchArgument("require_enable", default_value="true"),
 
-        # Speed-mode controls
+        # Speed-mode controls: holding fast_mode_button (right
+        # bumper) boosts to full speed.
         DeclareLaunchArgument("fast_mode_button", default_value="5"),
         DeclareLaunchArgument("low_speed_scale", default_value="0.50"),
         DeclareLaunchArgument("slow_mode_scale", default_value="0.50"),
@@ -69,22 +72,10 @@ def generate_launch_description():
         DeclareLaunchArgument("circle_spray_sec", default_value="0.0"),
         DeclareLaunchArgument("triangle_spray_sec", default_value="0.0"),
         DeclareLaunchArgument("square_spray_sec", default_value="0.0"),
-
-        # PS4 joystick driver
-        Node(
-            package="joy",
-            executable="joy_node",
-            name="joy_node",
-            output="screen",
-            parameters=[{
-                "dev": joy_dev,
-                "deadzone": 0.0,
-                "autorepeat_rate": 20.0,
-            }],
-            remappings=[
-                ("/joy", joy_topic),
-            ],
-        ),
+        DeclareLaunchArgument(
+            "spray_valve_state_topic", default_value="/spray/valve_state"),
+        DeclareLaunchArgument(
+            "joy_feedback_topic", default_value="/joy/set_feedback"),
 
         # Existing robot-independent SprayBot tank mixer.
         # Publishes geometry_msgs/msg/TwistStamped on /cmd_vel_teleop.
@@ -130,6 +121,18 @@ def generate_launch_description():
                 "circle_duration_sec": LaunchConfiguration("circle_spray_sec"),
                 "triangle_duration_sec": LaunchConfiguration("triangle_spray_sec"),
                 "square_duration_sec": LaunchConfiguration("square_spray_sec"),
+            }],
+        ),
+
+        # Rumble at full intensity while the firmware reports the valve open.
+        Node(
+            package="obot",
+            executable="spray_rumble_node",
+            name="spray_rumble_node",
+            output="screen",
+            parameters=[{
+                "valve_state_topic": LaunchConfiguration("spray_valve_state_topic"),
+                "feedback_topic": LaunchConfiguration("joy_feedback_topic"),
             }],
         ),
 

@@ -13,18 +13,15 @@ def clamp(x, lo, hi):
     return max(lo, min(hi, x))
 
 
-def apply_deadband(x, deadband):
+def digitize_stick(x, threshold):
     """
-    Deadband with rescaling:
-      |x| <= deadband -> 0
-      otherwise rescale remaining range back to [-1, 1]
+    Non-proportional (on/off) stick response:
+      |x| > threshold -> full +/-1
+      otherwise -> 0
     """
-    if abs(x) <= deadband:
-        return 0.0
-
-    sign = 1.0 if x > 0 else -1.0
-    scaled = (abs(x) - deadband) / (1.0 - deadband)
-    return sign * clamp(scaled, 0.0, 1.0)
+    if abs(x) > threshold:
+        return 1.0 if x > 0 else -1.0
+    return 0.0
 
 
 class TankMixerNode(Node):
@@ -48,7 +45,9 @@ class TankMixerNode(Node):
         self.declare_parameter("invert_right", False)
 
         # ---------------- Feel / scaling ----------------
-        self.declare_parameter("deadband", 0.20)
+        # Sticks are non-proportional: above this fraction of
+        # travel the stick reads as fully on, otherwise off.
+        self.declare_parameter("deadband", 0.50)
         self.declare_parameter("track_width", 0.40)   # meters
         self.declare_parameter("max_linear", 1.0)     # m/s
 
@@ -68,8 +67,9 @@ class TankMixerNode(Node):
 
         # ---------------- Speed behavior ----------------
         # Base operation is low speed while enabled.
-        # fast_mode_button allows full speed only for forward,
-        # dual-stick drive.
+        # Holding fast_mode_button (right bumper) is a simple
+        # high-speed boost: full speed while held, low speed
+        # otherwise, regardless of stick direction.
         self.declare_parameter("fast_mode_button", 5)
         self.declare_parameter(
             "low_speed_scale",
@@ -80,13 +80,6 @@ class TankMixerNode(Node):
         self.declare_parameter(
             "slow_mode_scale",
             DEFAULT_LOW_SPEED_SCALE
-        )
-
-        # Full speed only when left/right stick commands are
-        # close enough to straight.
-        self.declare_parameter(
-            "full_speed_turn_tolerance",
-            0.10
         )
 
         # ---------------- Single-stick low speed ----------------
@@ -178,27 +171,10 @@ class TankMixerNode(Node):
         ):
             self.low_speed_scale = legacy_slow_mode_scale
 
-        self.full_speed_turn_tolerance = float(
-            self.get_parameter(
-                "full_speed_turn_tolerance"
-            ).value
-        )
-
         self.single_stick_low_speed_scale = float(
             self.get_parameter(
                 "single_stick_low_speed_scale"
             ).value
-        )
-
-        # Most gamepads report forward stick as negative unless
-        # explicitly inverted.
-        #
-        # Derive the sign that should be treated as forward after
-        # inversion settings are applied.
-        self.forward_axis_sign = (
-            1.0
-            if (self.invert_left and self.invert_right)
-            else -1.0
         )
 
         # ---------------- State ----------------
@@ -226,23 +202,22 @@ class TankMixerNode(Node):
         self.get_logger().info(
             "Tank mixer started | "
             f"axes(L,R)=({self.left_axis},{self.right_axis}) "
-            f"deadband={self.deadband} "
+            f"stick_threshold={self.deadband} "
             f"enable_button={self.enable_button} "
             f"enable_axis={self.enable_axis} "
             f"fast_mode_button={self.fast_mode_button} "
             f"low_speed_scale={self.low_speed_scale} "
             f"single_stick_scale="
             f"{self.single_stick_low_speed_scale} "
-            f"full_speed_turn_tolerance="
-            f"{self.full_speed_turn_tolerance} "
             f"cmd_vel_out={self.cmd_vel_out} "
             f"frame_id={self.frame_id}"
         )
 
         self.get_logger().info(
-            "Gate mode active: full speed requires holding "
-            "fast_mode_button + forward dual-stick straight drive "
-            f"(forward_axis_sign={self.forward_axis_sign:+.0f})"
+            "Non-proportional sticks: above "
+            f"{self.deadband * 100:.0f}% travel is full on, "
+            "below is off. Holding fast_mode_button boosts to "
+            "full speed."
         )
 
     # ---------- Helpers ----------
@@ -358,12 +333,14 @@ class TankMixerNode(Node):
         if self.invert_right:
             R *= -1.0
 
-        L = apply_deadband(
+        # Non-proportional sticks: fully on above threshold,
+        # off below it.
+        L = digitize_stick(
             clamp(L, -1.0, 1.0),
             self.deadband
         )
 
-        R = apply_deadband(
+        R = digitize_stick(
             clamp(R, -1.0, 1.0),
             self.deadband
         )
@@ -378,61 +355,20 @@ class TankMixerNode(Node):
             (L == 0.0) != (R == 0.0)
         )
 
-        dual_stick_active = (
-            (L != 0.0) and (R != 0.0)
-        )
-
-        turning = (
-            abs(R - L) >
-            self.full_speed_turn_tolerance
-        )
-
-        forward_dual_stick = (
-            (L * self.forward_axis_sign > 0.0)
-            and
-            (R * self.forward_axis_sign > 0.0)
-        )
-
-        # Full speed override is a strict hold-to-run gate:
-        #
-        # - fast button must be held
-        # - enable control must be held
-        # - both sticks must be forward
-        # - both sticks must be active
-        # - command must be approximately straight
-        #
-        # Spinning, one-wheel turning, or reverse motion always
-        # stays low speed.
+        # High-speed mode: holding fast_mode_button (right
+        # bumper) simply boosts to full speed while held.
         fast_pressed = self._get_button(
             msg,
             self.fast_mode_button
         )
 
-        enable_pressed = (
-            self._get_button(
-                msg,
-                self.enable_button
-            )
-            if self.enable_button >= 0
-            else enabled
-        )
-
-        full_speed_allowed = (
-            fast_pressed
-            and enable_pressed
-            and dual_stick_active
-            and forward_dual_stick
-            and (not turning)
-        )
-
         scale = (
             self.max_linear
-            if full_speed_allowed
+            if fast_pressed
             else low_speed_scale
         )
 
-        # If only one stick is engaged after deadband,
-        # run at reduced low speed.
+        # If only one stick is engaged, run at reduced low speed.
         if single_stick_active:
             scale = (
                 low_speed_scale *

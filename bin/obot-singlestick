@@ -1,0 +1,4 @@
+source /opt/ros/jazzy/setup.bash
+source ~/Workspaces/obot_ws/install/setup.bash
+
+ros2 launch obot obot_single_stick.launch.py  max_linear:=1.0  low_speed_scale:=0.75

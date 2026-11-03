@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+MODE="${1:-}"
+
+case "$MODE" in
+    single)
+        DRIVE_SCRIPT="$HOME/bin/obot-singlestick"
+        ;;
+    skid)
+        DRIVE_SCRIPT="$HOME/bin/obot-skidsteer"
+        ;;
+    *)
+        echo "Usage: obot-start {single|skid}"
+        exit 1
+        ;;
+esac
+
+source /opt/ros/jazzy/setup.bash
+source "$HOME/Workspaces/obot_ws/install/setup.bash"
+source "$HOME/Workspaces/obot-robot/install/setup.bash"
+
+PIDS=()
+
+cleanup() {
+    trap - INT TERM EXIT
+
+    echo
+    echo "Stopping OBot operator programs..."
+
+    for pid in "${PIDS[@]}"; do
+        kill -INT -- "-$pid" 2>/dev/null || true
+    done
+
+    sleep 3
+
+    for pid in "${PIDS[@]}"; do
+        kill -TERM -- "-$pid" 2>/dev/null || true
+    done
+
+    wait 2>/dev/null || true
+}
+
+trap cleanup INT TERM EXIT
+
+echo "Starting OBot operator controls: $MODE"
+
+# Drive controller
+setsid bash "$DRIVE_SCRIPT" &
+PIDS+=("$!")
+
+# Spray valve client
+setsid ros2 launch obot_valve_controller ps4_valve_client.launch.py &
+PIDS+=("$!")
+
+# Dual-camera viewer
+setsid "$HOME/bin/obot-view2cams" &
+PIDS+=("$!")
+
+echo
+echo "OBot operator programs started."
+echo "Press Ctrl+C to stop all three."
+
+wait
