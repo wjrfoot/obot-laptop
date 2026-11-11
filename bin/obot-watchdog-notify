@@ -8,16 +8,68 @@ export CYCLONEDDS_URI=file://$HOME/cyclonedds_wifi.xml
 source /opt/ros/jazzy/setup.bash
 
 exec python3 - <<'PY'
+import re
 import subprocess
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_msgs.msg import String
+
+LEVELS = {
+    '[INFO] ': ('normal', 'OBot Watchdog'),
+    '[WARNING] ': ('normal', 'OBot Watchdog WARNING'),
+    '[CRITICAL] ': ('critical', 'OBot Watchdog CRITICAL'),
+}
+# Untagged events (OBot-1 watchdog) keep the original critical urgency.
+UNTAGGED = ('critical', 'OBot Watchdog')
+
+SIDE = re.compile(r'\b(left|right)\b S1', re.IGNORECASE)
+RECOVERY_WORDS = ('recovered', 'cleared', 'restarted', 'reset complete')
+
+
+def classify(text):
+    """Return (state key, urgency, title, is_recovery) for an event."""
+    urgency, title = UNTAGGED
+    tagged = False
+    for prefix, (level_urgency, level_title) in LEVELS.items():
+        if text.startswith(prefix):
+            urgency, title, tagged = level_urgency, level_title, True
+            break
+    side = SIDE.search(text)
+    key = side.group(1).lower() if side else 'general'
+    lowered = text.lower()
+    recovery = any(
+        word in lowered for word in RECOVERY_WORDS
+    )
+    return key, urgency, title, recovery
+
+
+def send_notification(urgency, title, text, replace_id=None):
+    """Show or replace a notification; return its ID, or None on failure."""
+    command = ['notify-send', '-p', '-u', urgency]
+    if replace_id is not None:
+        command += ['-r', str(replace_id)]
+    command += [title, text]
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=5,
+            check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    output = result.stdout.strip()
+    if result.returncode == 0 and output.isdigit():
+        return int(output)
+    return None
 
 
 class WatchdogNotifier(Node):
     def __init__(self):
         super().__init__('obot_watchdog_notifier')
+
+        # Per controller (left, right, general): the notification ID
+        # and the last event text shown for it.
+        self.state = {}
 
         self.sub = self.create_subscription(
             String,
@@ -35,27 +87,39 @@ class WatchdogNotifier(Node):
             f'Watchdog event: {msg.data}'
         )
 
-        # Watchdogs that tag events as "[LEVEL] text" get matching urgency.
-        # Untagged events (OBot-1 watchdog) keep the original critical urgency.
-        urgency = 'critical'
-        title = 'OBot Watchdog'
-        if msg.data.startswith('[INFO] '):
-            urgency = 'normal'
-        elif msg.data.startswith('[WARNING] '):
-            urgency = 'normal'
-            title = 'OBot Watchdog WARNING'
-        elif msg.data.startswith('[CRITICAL] '):
-            title = 'OBot Watchdog CRITICAL'
+        key, urgency, title, recovery = classify(msg.data)
+        entry = self.state.setdefault(key, {'id': None, 'text': None})
 
-        subprocess.run(
-            [
-                'notify-send',
-                '-u', urgency,
-                title,
-                msg.data
-            ],
-            check=False
+        if msg.data == entry['text']:
+            return
+
+        # Critical escalation must generate a visible popup.
+        # GNOME may silently update an existing notification when
+        # its urgency changes from normal to critical.
+        previous_critical = (
+            entry['text'] is not None
+            and entry['text'].startswith('[CRITICAL] ')
         )
+        replace_id = entry['id']
+        if urgency == 'critical' and not previous_critical:
+            replace_id = None
+
+        notification_id = send_notification(
+            urgency, title, msg.data, replace_id)
+        if notification_id is None and entry['id'] is not None:
+            # The old notification may have been dismissed; show a new one.
+            notification_id = send_notification(urgency, title, msg.data)
+
+        if notification_id is None:
+            # Not shown; forget the text so the next event tries again.
+            entry['id'] = None
+            entry['text'] = None
+            self.get_logger().warn('notify-send failed')
+            return
+
+        entry['text'] = msg.data
+        # After a recovery the next fault must create a new notification.
+        entry['id'] = None if recovery else notification_id
 
 
 def main():
@@ -64,7 +128,7 @@ def main():
 
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
