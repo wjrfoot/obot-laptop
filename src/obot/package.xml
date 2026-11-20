@@ -14,6 +14,7 @@
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
   <depend>visualization_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>nav2_msgs</depend>
@@ -22,6 +23,8 @@
 
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>obot_valve_controller</exec_depend>
+  <exec_depend>joy</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>python3-pyqt5</exec_depend>
 

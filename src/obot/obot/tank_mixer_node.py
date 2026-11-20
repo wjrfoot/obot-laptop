@@ -1,32 +1,24 @@
 #!/usr/bin/env python3
 
+import time
+
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
 from geometry_msgs.msg import TwistStamped
 
+from .tank_mixer_safety import (
+    OutputKind,
+    TankMixerController,
+)
+
 
 DEFAULT_LOW_SPEED_SCALE = 0.35
 
 
-def clamp(x, lo, hi):
-    return max(lo, min(hi, x))
-
-
-def digitize_stick(x, threshold):
-    """
-    Non-proportional (on/off) stick response:
-      |x| > threshold -> full +/-1
-      otherwise -> 0
-    """
-    if abs(x) > threshold:
-        return 1.0 if x > 0 else -1.0
-    return 0.0
-
-
 class TankMixerNode(Node):
-    def __init__(self):
-        super().__init__("tank_mixer_node")
+    def __init__(self, **node_kwargs):
+        super().__init__("tank_mixer_node", **node_kwargs)
 
         # ---------------- Topics ----------------
         self.declare_parameter("joy_topic", "/joy")
@@ -40,6 +32,10 @@ class TankMixerNode(Node):
         # ---------------- Axes (tank) ----------------
         self.declare_parameter("left_axis", 1)
         self.declare_parameter("right_axis", 4)
+        # Left stick sideways alone spins in place. The right stick's
+        # sideways axis must also be inside the deadband. -1 disables both.
+        self.declare_parameter("left_turn_axis", 0)
+        self.declare_parameter("right_turn_axis", 3)
 
         self.declare_parameter("invert_left", False)
         self.declare_parameter("invert_right", False)
@@ -111,6 +107,14 @@ class TankMixerNode(Node):
             self.get_parameter("right_axis").value
         )
 
+        self.left_turn_axis = int(
+            self.get_parameter("left_turn_axis").value
+        )
+
+        self.right_turn_axis = int(
+            self.get_parameter("right_turn_axis").value
+        )
+
         self.invert_left = bool(
             self.get_parameter("invert_left").value
         )
@@ -179,6 +183,25 @@ class TankMixerNode(Node):
 
         # ---------------- State ----------------
         self.last_joy_time = None
+        self._last_invalid_warning_time = None
+        self.controller = TankMixerController(
+            left_axis=self.left_axis,
+            right_axis=self.right_axis,
+            left_turn_axis=self.left_turn_axis,
+            right_turn_axis=self.right_turn_axis,
+            invert_left=self.invert_left,
+            invert_right=self.invert_right,
+            deadband=self.deadband,
+            track_width=self.track_width,
+            max_linear=self.max_linear,
+            enable_button=self.enable_button,
+            enable_axis=self.enable_axis,
+            enable_axis_threshold=self.enable_axis_threshold,
+            require_enable=self.require_enable,
+            fast_mode_button=self.fast_mode_button,
+            low_speed_scale=self.low_speed_scale,
+            single_stick_low_speed_scale=self.single_stick_low_speed_scale,
+        )
 
         # ---------------- ROS interfaces ----------------
         self.publisher = self.create_publisher(
@@ -186,6 +209,8 @@ class TankMixerNode(Node):
             self.cmd_vel_out,
             10
         )
+
+        self._manual_driving = False
 
         self.subscription = self.create_subscription(
             Joy,
@@ -219,58 +244,18 @@ class TankMixerNode(Node):
             "below is off. Holding fast_mode_button boosts to "
             "full speed."
         )
+        if self.controller.configuration_error:
+            self.get_logger().error(
+                'Tank mixer disabled by invalid configuration: '
+                f'{self.controller.configuration_error}')
 
-    # ---------- Helpers ----------
-
-    def _get_axis(self, msg: Joy, idx: int) -> float:
-        if idx < 0:
-            return 0.0
-
-        if idx >= len(msg.axes):
+    def _warn_invalid_joy(self, warning):
+        now = time.monotonic()
+        if (self._last_invalid_warning_time is None
+                or now - self._last_invalid_warning_time >= 2.0):
             self.get_logger().warn(
-                f"Axis index {idx} out of range "
-                f"(len={len(msg.axes)})"
-            )
-            return 0.0
-
-        return float(msg.axes[idx])
-
-    def _get_button(self, msg: Joy, idx: int) -> bool:
-        if idx < 0:
-            return False
-
-        if idx >= len(msg.buttons):
-            self.get_logger().warn(
-                f"Button index {idx} out of range "
-                f"(len={len(msg.buttons)})"
-            )
-            return False
-
-        return bool(msg.buttons[idx])
-
-    def _is_enabled(self, msg: Joy) -> bool:
-        # If gating is off, always enabled.
-        if not self.require_enable:
-            return True
-
-        # Button gating.
-        if self.enable_button >= 0:
-            return self._get_button(
-                msg,
-                self.enable_button
-            )
-
-        # Axis gating (e.g. trigger).
-        if self.enable_axis >= 0:
-            val = self._get_axis(
-                msg,
-                self.enable_axis
-            )
-            return val > self.enable_axis_threshold
-
-        # If require_enable is True but no control is configured,
-        # treat as disabled for safety.
-        return False
+                f'Ignoring malformed or unsafe Joy input: {warning}')
+            self._last_invalid_warning_time = now
 
     def _publish_twist(
         self,
@@ -301,95 +286,28 @@ class TankMixerNode(Node):
 
     def joy_callback(self, msg: Joy):
         self.last_joy_time = self.get_clock().now()
-
-        # Hold-to-drive.
-        enabled = self._is_enabled(msg)
-
-        if not enabled:
-            # On deadman release, publish exactly one stop command,
-            # then remain silent so twist_mux can hand control to Nav2.
-            if getattr(self, "_teleop_was_enabled", False):
+        axes = getattr(msg, 'axes', None)
+        buttons = getattr(msg, 'buttons', None)
+        output = self.controller.process(axes, buttons)
+        if output.warning:
+            self._warn_invalid_joy(output.warning)
+        if output.kind is OutputKind.STOP:
+            if self._manual_driving:
                 self._publish_twist()
-
-            self._teleop_was_enabled = False
-            return
-
-        self._teleop_was_enabled = True
-
-        # Read tank axes.
-        L = self._get_axis(
-            msg,
-            self.left_axis
-        )
-
-        R = self._get_axis(
-            msg,
-            self.right_axis
-        )
-
-        if self.invert_left:
-            L *= -1.0
-
-        if self.invert_right:
-            R *= -1.0
-
-        # Non-proportional sticks: fully on above threshold,
-        # off below it.
-        L = digitize_stick(
-            clamp(L, -1.0, 1.0),
-            self.deadband
-        )
-
-        R = digitize_stick(
-            clamp(R, -1.0, 1.0),
-            self.deadband
-        )
-
-        # Base behavior: low speed when enabled.
-        low_speed_scale = (
-            self.max_linear *
-            self.low_speed_scale
-        )
-
-        single_stick_active = (
-            (L == 0.0) != (R == 0.0)
-        )
-
-        # High-speed mode: holding fast_mode_button (right
-        # bumper) simply boosts to full speed while held.
-        fast_pressed = self._get_button(
-            msg,
-            self.fast_mode_button
-        )
-
-        scale = (
-            self.max_linear
-            if fast_pressed
-            else low_speed_scale
-        )
-
-        # If only one stick is engaged, run at reduced low speed.
-        if single_stick_active:
-            scale = (
-                low_speed_scale *
-                self.single_stick_low_speed_scale
+                self._manual_driving = False
+        elif output.kind is OutputKind.DRIVE:
+            moving = (
+                abs(output.linear_x) > 1e-9
+                or abs(output.angular_z) > 1e-9
             )
-
-        # Tank mixing to linear/angular velocity.
-        v = (L + R) * 0.5 * scale
-
-        tw = (
-            self.track_width
-            if abs(self.track_width) > 1e-6
-            else 1e-6
-        )
-
-        w = (R - L) / tw * scale
-
-        self._publish_twist(
-            linear_x=v,
-            angular_z=w
-        )
+            if moving:
+                self._manual_driving = True
+                self._publish_twist(
+                    linear_x=output.linear_x,
+                    angular_z=output.angular_z)
+            elif self._manual_driving:
+                self._publish_twist()
+                self._manual_driving = False
 
     def watchdog(self):
         if self.joy_timeout_sec <= 0:
@@ -405,7 +323,8 @@ class TankMixerNode(Node):
         ).nanoseconds / 1e9
 
         if dt > self.joy_timeout_sec:
-            if getattr(self, "_teleop_was_enabled", False):
+            output = self.controller.timeout()
+            if output.kind is OutputKind.STOP:
                 self.get_logger().info(
                     "Watchdog timeout: "
                     f"no Joy message for {dt:.3f}s "
@@ -415,7 +334,6 @@ class TankMixerNode(Node):
 
                 self._publish_twist()
 
-            self._teleop_was_enabled = False
             self.last_joy_time = None
 
 

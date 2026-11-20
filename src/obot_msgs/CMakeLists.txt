@@ -9,6 +9,7 @@ find_package(geometry_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/WifiSample.msg"
   "msg/SprayEvent.msg"
+  "srv/ClickDrive.srv"
   DEPENDENCIES std_msgs geometry_msgs
 )
 

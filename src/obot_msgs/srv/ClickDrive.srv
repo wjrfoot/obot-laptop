@@ -1,0 +1,12 @@
+# Commands: TURN, DRIVE, STOP, STATUS
+string command
+
+# TURN: positive = right, negative = left (degrees)
+float64 angle_deg
+
+# DRIVE: positive forward distance (meters)
+float64 distance_m
+---
+bool accepted
+string state
+string message
