@@ -1,16 +1,18 @@
-"""Record odom-relative pose and spray length to a text file per session.
+"""
+Record odom-relative pose and spray length to a text file per session.
 
 L2 opens a new file named odom<timestamp>.txt in the output directory and R2
 closes it. While a file is open, each press of a spray button with a duration
 > 0 appends one line: x y yaw spray_sec. The pose is expressed relative to the
 odom pose at the moment the file was opened (x forward, y left, yaw in degrees).
+Distances use the selected distance_unit parameter (feet by default).
 """
 import math
-import os
 from datetime import datetime
+import os
 
-import rclpy
 from nav_msgs.msg import Odometry
+import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
 
@@ -33,12 +35,13 @@ def wrap_angle(a):
 
 class OdomSprayRecord(Node):
     def __init__(self):
-        super().__init__('odomsprayrecord')
+        super().__init__('odom_spray_record')
         self.declare_parameter('output_dir', os.path.expanduser('~/odom_records'))
         self.declare_parameter('joy_topic', '/joy')
         self.declare_parameter('odom_topic', '/diff_drive_controller/odom')
         self.declare_parameter('start_button', 6)  # L2
         self.declare_parameter('stop_button', 7)   # R2
+        self.declare_parameter('distance_unit', 'feet')
         for name, index in SPRAY_BUTTONS.items():
             self.declare_parameter(f'{name}_duration_sec', 0.0)
             self.declare_parameter(f'{name}_button', index)
@@ -46,6 +49,11 @@ class OdomSprayRecord(Node):
         self.output_dir = os.path.expanduser(str(self.get_parameter('output_dir').value))
         self.start_button = int(self.get_parameter('start_button').value)
         self.stop_button = int(self.get_parameter('stop_button').value)
+        self.distance_unit = str(self.get_parameter('distance_unit').value).strip().lower()
+        if self.distance_unit not in ('meters', 'feet'):
+            raise ValueError("distance_unit must be either 'meters' or 'feet'")
+        self.distance_scale = 1.0 if self.distance_unit == 'meters' else 1.0 / 0.3048
+        self.distance_unit_label = 'm' if self.distance_unit == 'meters' else 'ft'
         self.sprays = {}
         for name in SPRAY_BUTTONS:
             duration = float(self.get_parameter(f'{name}_duration_sec').value)
@@ -61,9 +69,10 @@ class OdomSprayRecord(Node):
             Odometry, str(self.get_parameter('odom_topic').value), self.on_odom, 10)
         self.create_subscription(
             Joy, str(self.get_parameter('joy_topic').value), self.on_joy, 10)
+        enabled_sprays = {name: duration for name, (_, duration) in self.sprays.items()} or 'none'
         self.get_logger().info(
-            f'output_dir={self.output_dir}; enabled spray buttons: '
-            f'{ {n: d for n, (_, d) in self.sprays.items()} or "none"}')
+            f'output_dir={self.output_dir}; distance_unit={self.distance_unit}; '
+            f'enabled spray buttons: {enabled_sprays}')
 
     def on_odom(self, msg):
         p = msg.pose.pose
@@ -98,7 +107,9 @@ class OdomSprayRecord(Node):
             self.get_logger().error(f'Cannot open record file: {exc}')
             return
         self.origin = self.pose
-        self.file.write('# x_m y_m yaw_deg spray_sec (relative to start pose)\n')
+        self.file.write(
+            f'# x_{self.distance_unit_label} y_{self.distance_unit_label} '
+            'yaw_deg spray_sec (relative to start pose)\n')
         self.file.flush()
         self.get_logger().info(f'Recording to {path}')
 
@@ -115,8 +126,8 @@ class OdomSprayRecord(Node):
         x, y, yaw = self.pose
         dx, dy = x - ox, y - oy
         c, s = math.cos(oyaw), math.sin(oyaw)
-        rel_x = c * dx + s * dy
-        rel_y = -s * dx + c * dy
+        rel_x = (c * dx + s * dy) * self.distance_scale
+        rel_y = (-s * dx + c * dy) * self.distance_scale
         rel_yaw = math.degrees(wrap_angle(yaw - oyaw))
         self.file.write(f'{rel_x:.3f} {rel_y:.3f} {rel_yaw:.1f} {duration:.2f}\n')
         self.file.flush()
