@@ -110,6 +110,42 @@ stationary objects before using the overlay; also verify stale and TF-error
 indications with the robot stationary. Disable it with
 `--ros-args -p lidar.enabled:=false` if needed.
 
+## Odometry path in RViz
+
+The robot-side `obot_path_recorder` starts with `obot_base.launch.py` and
+samples `/diff_drive_controller/odom` (`nav_msgs/msg/Odometry`). It publishes
+the bounded trajectory on `/obot/path` (`nav_msgs/msg/Path`) at 2 Hz with
+reliable, transient-local QoS. Its defaults are 0.05 m, 0.15 rad, and 10,000
+poses; configure `minimum_distance_m`, `minimum_angle_rad`, `max_points`,
+`publish_rate_hz`, `odom_topic`, and `path_topic` as ROS parameters on the
+recorder. The startup defaults are in
+`obot_bringup/config/path_recorder.yaml`; supply an alternative file with
+`ros2 launch obot_bringup obot_base.launch.py path_recorder_config:=/absolute/path/to/parameters.yaml`.
+These parameters are read at startup. Invalid values prevent the recorder
+from starting.
+
+After building and deploying the robot-side changes, build `obot_description`
+on the laptop and open the separate RViz profile:
+
+    ros2 run rviz2 rviz2 -d "$(ros2 pkg prefix obot_description)/share/obot_description/rviz/obot_path.rviz"
+
+The profile keeps the Grid and uses the `odom` fixed frame and a yellow Path
+display. To configure an existing RViz setup instead, add a Path display for
+`/obot/path`, set reliability to Reliable and durability to Transient Local,
+and set Fixed Frame to the odometry frame. Reduce any Odometry display's
+history to one pose if arrows accumulate.
+
+The viewer's **CLEAR PATH** button calls `/obot/clear_path`
+(`std_srvs/srv/Trigger`) asynchronously. To clear manually:
+
+    clear
+    ros2 service call /obot/clear_path std_srvs/srv/Trigger '{}'
+
+Clearing affects only recorded visualization history, not odometry, TF or the
+dashboard's independent **RESET ORIGIN**. The next valid odometry pose starts
+a new path. A changed odometry frame or a backward timestamp jump greater than
+one second clears the prior path automatically.
+
 ROS 2 software, firmware, utilities, and configuration used on the OBot development and operator laptop (`ros-24`).
 
 This repository contains the laptop-side portion of the SprayBot/OBot system. Robot-side software running on `pi-bot-1` is maintained separately in the `obot-robot` repository.
