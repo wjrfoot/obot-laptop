@@ -137,6 +137,34 @@ and GO worked, and motion used the selected slider speed. This is the
 operator's reported result for that test, not a certification of all operating
 conditions.
 
+### Filtered LiDAR scan
+
+The optional scan-filter launch reads `/scan` and publishes `/scan_filtered`;
+it does not alter `/scan` or the viewer's LiDAR input. After building with the
+clean laptop procedure below, start it in the normal robot-network environment:
+
+    source /opt/ros/jazzy/setup.bash
+    source ~/Workspaces/obot_ws/install/local_setup.bash
+    source ~/Workspaces/obot_ws/install/obot/share/obot/package.bash
+    ros2 launch obot obot_scan_filter.launch.py
+
+The standard `laser_filters/LaserScanAngularBoundsFilterInPlace` uses the
+editable `src/obot/config/scan_filter.yaml`. It masks angles strictly between
+0.436332 and 2.792527 radians in the laser frame, with angle wrapping enabled.
+With the verified +90-degree laser yaw, this is the rear sector, retaining
+approximately 225 degrees centered near robot forward. Masked ranges are NaN
+and their intensities are zero. The timestamp, frame, scan geometry, and
+sample counts remain unchanged. Editing the configuration requires restarting
+the filter; for a non-symlink install, rebuild to install changes.
+
+On 2026-11-23, ten paired live OBot-2 scans had 1,800 samples each. All 6,750
+rear-sector samples were masked, all 11,250 samples outside the sector were
+unchanged, and 2,814 valid returns remained within 30 degrees of forward.
+The installed SLAM Toolbox 2.8.3 Karto code excludes NaNs from valid scan
+points, scan-matching offsets, and occupancy-grid rays. This is a source
+inspection, not a live SLAM test; SLAM Toolbox and Nav2 are not configured by
+this launch.
+
 ### LiDAR operator overlay
 
 The front view displays a compact `FRONT`, `LEFT`, `RIGHT` panel in feet.

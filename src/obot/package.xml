@@ -23,6 +23,7 @@
 
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>laser_filters</exec_depend>
   <exec_depend>obot_valve_controller</exec_depend>
   <exec_depend>obot_valve_interfaces</exec_depend>
   <exec_depend>action_msgs</exec_depend>

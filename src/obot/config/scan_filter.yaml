@@ -1,0 +1,10 @@
+obot_scan_filter:
+  ros__parameters:
+    filter1:
+      name: rear_sector
+      type: laser_filters/LaserScanAngularBoundsFilterInPlace
+      params:
+        lower_angle: 0.436332
+        upper_angle: 2.792527
+        replace_with_nan: true
+        wrap_angle: true
