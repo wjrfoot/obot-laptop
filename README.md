@@ -1,5 +1,55 @@
 # OBot Laptop
 
+## Camera telemetry dashboard
+
+Build `obot`, source the workspace, and run `ros2 run obot view2cams` (or
+`bin/obot-view2cams`). The combined camera window starts maximized; it can
+still be restored or resized. The dashboard appears below the rear view. Click
+`POSITION` to choose Odom or Map; unavailable or stale transforms are
+shown as unavailable, never substituted with another frame. Click
+`RESET ORIGIN` to zero the selected frame **for display only**. Odom and Map
+keep independent origins until the viewer exits. This does not reset ROS
+odometry or modify TF. If TF is unavailable or stale, reset is refused.
+
+The motion command comes from `/diff_drive_controller/cmd_vel`; actual
+motion is the wheel-odometry estimate from `/diff_drive_controller/odom`,
+not a measurement of ground speed. Wheel RPM comes from `/joint_states`,
+matched by joint name. For operator clarity, the left wheel's displayed sign
+is inverted; the right wheel retains its joint sign. The `/joint_states`
+data itself is unchanged. DC bus voltages are
+motor-controller measurements, not battery-voltage measurements. The panel
+does not control motors and does not replace collision avoidance or an E-stop.
+
+The OBot-2 watchdog must run the version publishing
+`/obot2/watchdog/bus_voltage/left`, `/obot2/watchdog/bus_voltage/right`
+(`std_msgs/Float32`) and `/obot2/watchdog/health` (`std_msgs/String`).
+Until that version is installed and running on the robot, those fields
+show `--` and `No Data`. Its health is `NORMAL`, `RECOVERING`, `FAULT` or
+`NO_DATA`; normal requires fresh CAN, heartbeat and error telemetry for both
+controllers. Values disappear after the configured freshness timeout.
+Existing passive-monitor topics can instead be selected with the voltage
+topic parameters, but must be configured for the correct robot node IDs.
+
+ROS parameters can be supplied with `--ros-args -p`, for example:
+
+    ros2 run obot view2cams --ros-args -p telemetry.stale_timeout_s:=3.0 -p telemetry.robot_frame:=base_link
+
+Parameters include `telemetry.enabled` (default true), `telemetry.refresh_hz`
+(5.0), `telemetry.stale_timeout_s` (2.0), `telemetry.command_topic`,
+`telemetry.odom_topic`, `telemetry.joint_states_topic`, `telemetry.odom_frame`
+(`odom`), `telemetry.map_frame` (`map`), `telemetry.robot_frame` (`base_link`),
+`telemetry.default_position_source` (`odom`), `telemetry.left_joint`,
+`telemetry.right_joint`, `telemetry.left_voltage_topic`,
+`telemetry.right_voltage_topic`, and `telemetry.health_topic`. Joint defaults
+are `left_drive_wheel_joint` and `right_drive_wheel_joint`.
+
+To check the dashboard without moving the robot, start the viewer, confirm
+both camera feeds and guidance markers, compare the telemetry to the ROS
+topics, select Map and verify unavailable transforms are reported, then reset
+the Odom display origin and check that ROS odometry remains unchanged. Stop a
+telemetry publisher to confirm its readings become stale. Test physical motion
+only with appropriate safety precautions.
+
 ## OBot-2 watchdog routing discrepancy
 
 On the inspected `pi-bot-2` deployment, `obot2_watchdog` published health
@@ -236,17 +286,19 @@ command to `/spray/valve_command`; a button whose duration is 0 (the default) is
 
 Arguments: `cross_spray_sec`, `circle_spray_sec`, `triangle_spray_sec`, `square_spray_sec`.
 
-### Session recording (odomsprayrecord)
+### Session recording (odom_spray_record)
 
-`odomsprayrecord` logs spray events to a text file per session. L2 opens a new
+`odom_spray_record` logs spray events to a text file per session. L2 opens a new
 `odom<YYYYmmdd_HHMMSS>.txt` in `output_dir` and R2 closes it. While open, each press of an
 enabled spray button (duration > 0) appends a line `x y yaw spray_sec`, with the pose relative to
-the odom pose when the file was opened (metres, degrees).
+the odom pose when the file was opened (feet by default, degrees). Set `distance_unit:=meters`
+to report x/y in metres instead.
 
-    ros2 launch obot odomsprayrecord.launch.py output_dir:=~/odom_records cross_spray_sec:=2.0
+    ros2 launch obot odom_spray_record.launch.py output_dir:=~/odom_records cross_spray_sec:=2.0
 
-Arguments: `output_dir`, `odom_topic` (default `/diff_drive_controller/odom`), `joy_topic`, and
-the four `*_spray_sec` values (keep them the same as for `obot_teleop.launch.py`).
+Arguments: `output_dir`, `odom_topic` (default `/diff_drive_controller/odom`), `joy_topic`,
+`distance_unit` (`feet` by default, or `meters`), and the four `*_spray_sec` values (keep them
+the same as for `obot_teleop.launch.py`).
 
 ## Build
 
