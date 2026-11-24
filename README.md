@@ -165,6 +165,25 @@ points, scan-matching offsets, and occupancy-grid rays. This is a source
 inspection, not a live SLAM test; SLAM Toolbox and Nav2 are not configured by
 this launch.
 
+### Initial SLAM mapping
+
+With OBot-2 running and the laptop on the robot ROS network, build using the
+clean laptop procedure below, then install and run the operator launcher:
+
+    install -m 755 ~/Workspaces/obot_ws/bin/obot-slam ~/bin/obot-slam
+    obot-slam
+
+It starts the scan filter, the Jazzy SLAM Toolbox asynchronous mapping
+lifecycle node, and RViz. Use `obot-slam rviz:=false` to omit RViz. Stop the
+launch with Ctrl-C when started in a terminal. Do not start a second filter
+or mapper while the launch is running; only one publisher should own `/map`
+and the `map` to `odom` transform.
+
+Parameters are in `src/obot/config/obot_slam.yaml`, based on the installed
+Jazzy asynchronous defaults. RViz uses `src/obot/rviz/obot_slam.rviz`. The
+launch does not save a map automatically or start navigation. Mapping quality
+and loop closures require a separate manual driving test.
+
 ### LiDAR operator overlay
 
 The front view displays a compact `FRONT`, `LEFT`, `RIGHT` panel in feet.

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -e
+
+source /opt/ros/jazzy/setup.bash
+source "$HOME/Workspaces/obot_ws/install/local_setup.bash"
+source "$HOME/Workspaces/obot_ws/install/obot/share/obot/package.bash"
+
+exec ros2 launch obot obot_slam.launch.py "$@"
