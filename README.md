@@ -50,7 +50,7 @@ the Odom display origin and check that ROS odometry remains unchanged. Stop a
 telemetry publisher to confirm its readings become stale. Test physical motion
 only with appropriate safety precautions.
 
-## OBot-2 watchdog routing discrepancy
+### OBot-2 watchdog routing discrepancy
 
 On the inspected `pi-bot-2` deployment, `obot2_watchdog` published health
 telemetry but no `/watchdog_lock` or `/cmd_vel_watchdog` topic. The running
@@ -61,7 +61,11 @@ configuration separately before relying on the watchdog to inhibit motion.
 The watchdog's motor fault monitoring and recovery should not be confused with
 a verified ROS velocity-command lock.
 
-## Camera motion controls
+### Camera motion controls
+
+Point-and-click/point-and-turn is the preferred manual operating interface.
+Operational testing found tank steering less satisfactory than anticipated;
+the PS4 remains available as an optional alternative.
 
 The lower front-camera overlay contains click-to-drive controls on the left and
 hold-to-move controls on the right. Releasing a direction, moving outside its
@@ -89,6 +93,25 @@ false and controls click-to-drive separately. To enable click-to-drive, start
 the viewer with `--ros-args -p click.enable_motion:=true` (alongside any
 desired speed parameters).
 
+On the current `ros-24` installation, `~/bin/obot-view2cams` enables
+click-to-drive and configures the 1.0 m/s viewer cap and the center marker.
+The repository's `bin/obot-view2cams` uses defaults instead. For an explicit
+startup without relying on the machine-local script:
+
+    source /opt/ros/jazzy/setup.bash
+    source ~/Workspaces/obot_ws/install/setup.bash
+    ros2 run obot view2cams --ros-args \
+      -p click.enable_motion:=true \
+      -p directional.linear_limit_mps:=1.0 \
+      -p directional.max_speed_mps:=1.0 \
+      -p center_thickness:=4 \
+      -p center_height_fraction:=0.4
+
+The Pi's separate `max_viewer_linear_speed` limit must also permit the
+requested speed. Selecting a target does not move the robot: select TURN to
+rotate, then enter a distance and select GO. CANCEL stops or cancels the
+operation. The directional diamond takes priority over click-to-drive.
+
 These changes require matching rebuilt `obot_msgs` interfaces and the updated
 motion node on the robot and viewer on the laptop. The revised service is not
 wire-compatible with the previous `ClickDrive` service. Motion requests have a
@@ -98,7 +121,7 @@ pi-bot-2, and the directional controls were exercised on the robot. Test stop
 and takeover behavior in a controlled setting before use. `obot-view2cams`
 itself requires no changes.
 
-## LiDAR operator overlay
+### LiDAR operator overlay
 
 The front view displays a compact `FRONT`, `LEFT`, `RIGHT` panel in feet.
 `FRONT` is the median forward centerline distance; the sides are the nearest
@@ -277,14 +300,80 @@ Start the micro-ROS agent on the laptop (UDP port 8888, `ROS_DOMAIN_ID=5`):
 
 Optional arguments: `port:=8888 domain_id:=5`.
 
+### Optional PS4 joystick operation
+
+On the inspected `ros-24` installation, `joy_ps4.service` is enabled and
+starts `joy_node` automatically at boot with 20 Hz autorepeat. It is
+independent of the viewer and steering launches. Those launches are started
+manually; neither starts another joystick driver. The service is machine-local
+and is not supplied in this repository. On another machine, install the ROS 2
+Jazzy `joy` package, configure the ROS domain and CycloneDDS environment, and
+install an appropriate joystick service or start one `joy_node` manually. Do
+not run two drivers for the same controller. Check the service with:
+
+    systemctl status joy_ps4.service
+    systemctl is-enabled joy_ps4.service
+
+To pair a PS4 DualShock controller, enable Bluetooth on the laptop, hold SHARE
+and PS until the light flashes, then select **Wireless Controller** in the
+desktop Bluetooth settings. Alternatively connect it by USB. Confirm that the
+driver publishes `/joy` and the selected input device exists before operating.
+Pairing or a running `joy_node` alone does not start a steering mixer.
+
+For optional tank steering, source both workspaces and start the launch
+manually:
+
+    cd ~/Workspaces/obot_ws
+    source /opt/ros/jazzy/setup.bash
+    source ~/Workspaces/obot-robot/install/setup.bash
+    source install/setup.bash
+    ros2 launch obot obot_teleop.launch.py
+
+It starts the tank mixer and a PS4 spray action client, not `joy_node` or a
+separate rumble node. The action client provides valve and watchdog rumble.
+Stop the launch with Ctrl+C. Circle, Square and Triangle spray durations
+default to zero (disabled); override `circle_spray_sec`, `square_spray_sec`,
+or `triangle_spray_sec` to enable them. Cross cancels. Set durations only as
+appropriate for the installed valve server.
+
+For optional single-stick steering, start
+`ros2 launch obot obot_single_stick.launch.py`; it starts the mixer only.
+For spray controls with that mode, separately run
+`ros2 launch obot_valve_controller ps4_valve_client.launch.py`. Its YAML
+configuration and defaults differ from the tank launch; check the installed
+configuration before use.
+
+F1 (button 4) must remain held for motion. Both tank sticks must be in the
+existing deadband before motion can be enabled; if F1 is pressed with a stick
+displaced, the mixer publishes zero commands until both sticks are neutral.
+It publishes another zero command when neutral is reached, and motion may begin
+on a subsequent joystick message. Releasing F1 disarms teleop, publishes a stop
+if teleop owned control, then goes silent so `twist_mux` can hand control back
+to Nav2. Re-pressing F1 while either stick remains displaced will not restart
+motion. After joystick timeout, motion requires a fresh F1 release/press and
+neutral sticks. The physical E-stop remains the emergency-stop mechanism;
+software interlocks are not a substitute for it.
+
+The mixer keeps `require_enable` for direct node configuration. When true, a
+valid enable button or axis is mandatory; missing or invalid controls fail
+closed. When false, the deadman gate is disabled. The OBot-2 launch fixes
+`require_enable:=true` and F1 button 4; do not disable or remap this interlock
+for normal OBot-2 operation.
+
+The existing `obot-start-single` and `obot-start-skid` scripts start a mixer,
+an additional spray client and a viewer; the current tank launch already starts
+its own spray client, so the skid variant can start duplicate clients. Avoid
+running it until that existing integration is reviewed. Script copies under
+`~/bin` may differ from the repository versions; check them before use.
+
 ### PS4 spray buttons
 
-`obot_teleop.launch.py` also starts `joy_spray_node`. Each face button publishes a timed
-command to `/spray/valve_command`; a button whose duration is 0 (the default) is disabled:
-
-    ros2 launch obot obot_teleop.launch.py cross_spray_sec:=2.0 circle_spray_sec:=0.5
-
-Arguments: `cross_spray_sec`, `circle_spray_sec`, `triangle_spray_sec`, `square_spray_sec`.
+The tank launch's `ps4_valve_client` sends requests to `/obot/spray` and
+provides rumble from valve-state and watchdog feedback. Rumble requires a
+controller and driver that support force feedback. The existing
+`joy_spray_node` and `spray_rumble_node` remain available separately for
+installations using their legacy `/spray/*` topics; they are not started by
+the current tank launch. Do not start multiple spray clients for one joystick.
 
 ### Session recording (odom_spray_record)
 
@@ -297,8 +386,8 @@ to report x/y in metres instead.
     ros2 launch obot odom_spray_record.launch.py output_dir:=~/odom_records cross_spray_sec:=2.0
 
 Arguments: `output_dir`, `odom_topic` (default `/diff_drive_controller/odom`), `joy_topic`,
-`distance_unit` (`feet` by default, or `meters`), and the four `*_spray_sec` values (keep them
-the same as for `obot_teleop.launch.py`).
+`distance_unit` (`feet` by default, or `meters`), and the four `*_spray_sec` values.
+Configure the recorder's durations to match the spray setup in use.
 
 ## Build
 
