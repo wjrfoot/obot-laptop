@@ -2,11 +2,19 @@
 set -e
 
 source /opt/ros/jazzy/setup.bash
-if [ -f "$HOME/Workspaces/obot-robot/install/setup.bash" ]; then
-    source "$HOME/Workspaces/obot-robot/install/setup.bash"
+valve_setup="$HOME/Workspaces/obot-robot/install/obot_valve_interfaces/share/obot_valve_interfaces/package.bash"
+if [ -f "$valve_setup" ]; then
+    source "$valve_setup"
 else
-    echo "Warning: robot workspace not found; spray controls may be unavailable." >&2
+    echo "Warning: valve interface package not found; spray controls may be unavailable." >&2
 fi
-source "$HOME/Workspaces/obot_ws/install/setup.bash"
+source "$HOME/Workspaces/obot_ws/install/local_setup.bash"
+source "$HOME/Workspaces/obot_ws/install/obot_msgs/share/obot_msgs/package.bash"
+source "$HOME/Workspaces/obot_ws/install/obot/share/obot/package.bash"
 
-exec ros2 run obot view2cams
+exec ros2 run obot view2cams --ros-args \
+  -p click.enable_motion:=true \
+  -p directional.linear_limit_mps:=1.0 \
+  -p directional.max_speed_mps:=1.0 \
+  -p center_thickness:=4 \
+  -p center_height_fraction:=0.4 "$@"

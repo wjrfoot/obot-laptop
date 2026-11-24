@@ -2,8 +2,8 @@
 
 ## Camera telemetry dashboard
 
-Build `obot`, source the workspace, and run `ros2 run obot view2cams` (or
-`bin/obot-view2cams`). The combined camera window starts maximized; it can
+Build `obot` and run `obot-view2cams` (or `bin/obot-view2cams` from this
+repository). The combined camera window starts maximized; it can
 still be restored or resized. The dashboard appears below the rear view. Click
 `POSITION` to choose Odom or Map; unavailable or stale transforms are
 shown as unavailable, never substituted with another frame. Click
@@ -93,20 +93,12 @@ false and controls click-to-drive separately. To enable click-to-drive, start
 the viewer with `--ros-args -p click.enable_motion:=true` (alongside any
 desired speed parameters).
 
-On the current `ros-24` installation, `~/bin/obot-view2cams` enables
-click-to-drive and configures the 1.0 m/s viewer cap and the center marker.
-The repository's `bin/obot-view2cams` uses defaults instead. For an explicit
-startup without relying on the machine-local script:
+On `ros-24`, both the repository and `~/bin/obot-view2cams` launchers enable
+click-to-drive, set the viewer's linear limit and slider maximum to 1.0 m/s,
+and set the center marker thickness to 4 pixels and height fraction to 0.4.
+After updating the repository launcher, install it with:
 
-    source /opt/ros/jazzy/setup.bash
-    source ~/Workspaces/obot-robot/install/setup.bash
-    source ~/Workspaces/obot_ws/install/setup.bash
-    ros2 run obot view2cams --ros-args \
-      -p click.enable_motion:=true \
-      -p directional.linear_limit_mps:=1.0 \
-      -p directional.max_speed_mps:=1.0 \
-      -p center_thickness:=4 \
-      -p center_height_fraction:=0.4
+    install -m 755 ~/Workspaces/obot_ws/bin/obot-view2cams ~/bin/obot-view2cams
 
 The Pi's separate `max_viewer_linear_speed` limit must also permit the
 requested speed. Selecting a target does not move the robot: select TURN to
@@ -119,11 +111,20 @@ started by this viewer. The displayed valve state is the robot's commanded
 state, not physical position feedback. Stale state shows UNKNOWN. The server
 accepts one spray at a time; it can reject a request while another client owns
 an active spray. The viewer cannot cancel a goal started by the PS4 client.
-Build and source the robot workspace's `obot_valve_interfaces` package before
-starting the viewer. If it is unavailable, camera and motion functions remain
-available but the spray panel reports DEPENDENCY MISSING. The repository
-`obot-view2cams` script sources the robot workspace if present; machine-local
-copies may need updating separately.
+Build the robot workspace's `obot_valve_interfaces` package before starting
+the viewer. The launcher sources only that package's environment hook, then
+the laptop workspace and its `obot_msgs` and `obot` hooks. If the interface is
+unavailable, camera and motion functions remain available but the spray
+panel reports DEPENDENCY MISSING.
+
+Both workspaces contain a Python distribution named `obot`. Sourcing the full
+robot workspace as an underlay while building the laptop workspace can record
+that underlay in the generated laptop setup; if the robot distribution is
+found first, the viewer's entry-point loader fails with `StopIteration`. Build
+the laptop workspace from a fresh shell with only ROS sourced, as in the
+Build section below. The launcher uses the laptop `local_setup.bash` to avoid
+following a stale generated underlay chain and explicitly prioritizes the
+laptop packages even when the calling shell already sourced the robot.
 
 These changes require matching rebuilt `obot_msgs` interfaces and the updated
 motion node on the robot and viewer on the laptop. The revised service is not
@@ -402,6 +403,9 @@ Arguments: `output_dir`, `odom_topic` (default `/diff_drive_controller/odom`), `
 Configure the recorder's durations to match the spray setup in use.
 
 ## Build
+
+Use a fresh shell without either workspace sourced, so the robot workspace is
+not recorded as a laptop underlay:
 
     cd ~/Workspaces/obot_ws
     source /opt/ros/jazzy/setup.bash
