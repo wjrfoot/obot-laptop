@@ -2,6 +2,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -14,12 +15,6 @@ def generate_launch_description():
     deadband = LaunchConfiguration("deadband")
     track_width = LaunchConfiguration("track_width")
     max_linear = LaunchConfiguration("max_linear")
-    joy_dev = LaunchConfiguration("joy_dev")
-
-    enable_button = LaunchConfiguration("enable_button")
-    enable_axis = LaunchConfiguration("enable_axis")
-    enable_axis_threshold = LaunchConfiguration("enable_axis_threshold")
-    require_enable = LaunchConfiguration("require_enable")
 
     fast_mode_button = LaunchConfiguration("fast_mode_button")
     low_speed_scale = LaunchConfiguration("low_speed_scale")
@@ -27,11 +22,9 @@ def generate_launch_description():
     single_stick_low_speed_scale = LaunchConfiguration(
         "single_stick_low_speed_scale"
     )
-
     return LaunchDescription([
         # PS4 / joystick input
         DeclareLaunchArgument("joy_topic", default_value="/joy"),
-        DeclareLaunchArgument("joy_dev", default_value="/dev/input/js0"),
 
         # Intermediate Twist topic from the generic SprayBot tank mixer.
         DeclareLaunchArgument("cmd_vel_joy", default_value="/cmd_vel_joy"),
@@ -51,12 +44,6 @@ def generate_launch_description():
         # Conservative initial teleop limit. Raise later after testing.
         DeclareLaunchArgument("max_linear", default_value="1.5"),
 
-        # Deadman / enable controls
-        DeclareLaunchArgument("enable_button", default_value="4"),
-        DeclareLaunchArgument("enable_axis", default_value="-1"),
-        DeclareLaunchArgument("enable_axis_threshold", default_value="0.5"),
-        DeclareLaunchArgument("require_enable", default_value="true"),
-
         # Speed-mode controls: holding fast_mode_button (right
         # bumper) boosts to full speed.
         DeclareLaunchArgument("fast_mode_button", default_value="5"),
@@ -68,12 +55,11 @@ def generate_launch_description():
         ),
 
         # Spray seconds per PS4 face button; 0 disables the button.
-        DeclareLaunchArgument("cross_spray_sec", default_value="0.0"),
         DeclareLaunchArgument("circle_spray_sec", default_value="0.0"),
         DeclareLaunchArgument("triangle_spray_sec", default_value="0.0"),
         DeclareLaunchArgument("square_spray_sec", default_value="0.0"),
         DeclareLaunchArgument(
-            "spray_valve_state_topic", default_value="/spray/valve_state"),
+            "spray_valve_state_topic", default_value="/obot/valve/state"),
         DeclareLaunchArgument(
             "joy_feedback_topic", default_value="/joy/set_feedback"),
 
@@ -96,10 +82,8 @@ def generate_launch_description():
                 "max_linear": max_linear,
                 "joy_timeout_sec": 0.5,
 
-                "enable_button": enable_button,
-                "enable_axis": enable_axis,
-                "enable_axis_threshold": enable_axis_threshold,
-                "require_enable": require_enable,
+                "enable_button": 4,
+                "require_enable": True,
 
                 "fast_mode_button": fast_mode_button,
                 "low_speed_scale": low_speed_scale,
@@ -108,31 +92,24 @@ def generate_launch_description():
             }],
         ),
 
-        # PS4 face buttons -> timed spray valve commands. A button with a
-        # duration of 0 is disabled; set e.g. cross_duration_sec to enable it.
+        # Circle, Square and Triangle start timed sprays; Cross cancels.
         Node(
-            package="obot",
-            executable="joy_spray_node",
-            name="joy_spray_node",
+            package="obot_valve_controller",
+            executable="ps4_valve_client",
+            name="ps4_valve_client",
             output="screen",
             parameters=[{
                 "joy_topic": joy_topic,
-                "cross_duration_sec": LaunchConfiguration("cross_spray_sec"),
-                "circle_duration_sec": LaunchConfiguration("circle_spray_sec"),
-                "triangle_duration_sec": LaunchConfiguration("triangle_spray_sec"),
-                "square_duration_sec": LaunchConfiguration("square_spray_sec"),
-            }],
-        ),
-
-        # Rumble at full intensity while the firmware reports the valve open.
-        Node(
-            package="obot",
-            executable="spray_rumble_node",
-            name="spray_rumble_node",
-            output="screen",
-            parameters=[{
+                "action_name": "/obot/spray",
                 "valve_state_topic": LaunchConfiguration("spray_valve_state_topic"),
                 "feedback_topic": LaunchConfiguration("joy_feedback_topic"),
+                "triangle_button": 2,
+                "circle_duration_sec": ParameterValue(
+                    LaunchConfiguration("circle_spray_sec"), value_type=float),
+                "square_duration_sec": ParameterValue(
+                    LaunchConfiguration("square_spray_sec"), value_type=float),
+                "triangle_duration_sec": ParameterValue(
+                    LaunchConfiguration("triangle_spray_sec"), value_type=float),
             }],
         ),
 
