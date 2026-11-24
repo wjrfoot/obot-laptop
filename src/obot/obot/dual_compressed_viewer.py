@@ -3,6 +3,7 @@
 import math
 import threading
 import time
+import uuid
 
 import cv2
 import numpy as np
@@ -16,15 +17,17 @@ from rclpy.time import Time
 from geometry_msgs.msg import TwistStamped
 from nav_msgs.msg import Odometry
 from rcl_interfaces.msg import ParameterDescriptor
-from sensor_msgs.msg import CompressedImage, JointState
+from sensor_msgs.msg import CompressedImage, JointState, LaserScan
 from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 from obot_msgs.srv import ClickDrive
 from tf2_ros import Buffer, TransformException, TransformListener
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import QEvent, QObject
+from PyQt5.QtWidgets import QApplication, QWidget
 
 from .fisheye_bearing import FisheyeBearing
 from .camera_dashboard import render_dashboard
+from .camera_lidar import LidarConfig, LidarState, process_scan
 from .camera_telemetry import Telemetry, wheel_speeds, yaw_from_quaternion
 
 
@@ -58,6 +61,27 @@ TELEMETRY_DEFAULTS = {
     'telemetry.left_voltage_topic': '/obot2/watchdog/bus_voltage/left',
     'telemetry.right_voltage_topic': '/obot2/watchdog/bus_voltage/right',
     'telemetry.health_topic': '/obot2/watchdog/health',
+}
+
+LIDAR_DEFAULTS = {
+    'lidar.enabled': True,
+    'lidar.topic': '/scan',
+    'lidar.center_half_angle_deg': 2.0,
+    'lidar.robot_width_m': 0.5334,
+    'lidar.safety_margin_m': 0.0762,
+    'lidar.warning_distance_m': 1.524,
+    'lidar.danger_distance_m': 0.6096,
+    'lidar.stale_timeout_s': 0.5,
+    'lidar.front_bumper_x_m': 0.30572,
+}
+
+DIRECTIONAL_DEFAULTS = {
+    'directional.min_speed_mps': 0.2,
+    'directional.max_speed_mps': 2.5,
+    'directional.default_speed_mps': 0.2,
+    'directional.linear_limit_mps': 0.2,
+    'directional.angular_limit_rps': 0.35,
+    'directional.wheel_separation_m': 0.486,
 }
 
 # Lets ints and floats (and lists of either) be set from the command line.
@@ -153,6 +177,70 @@ def draw_markers(img, cfg):
                     cfg.clearance_height, cfg.clearance_bgr)
 
 
+def lidar_labels(snapshot):
+    """Return display labels and colors without changing scan geometry."""
+    if snapshot.status != 'ok':
+        return [('LIDAR STALE' if snapshot.status == 'stale'
+                 else 'LIDAR ' + snapshot.status.upper(), (0, 180, 255))]
+    reading = snapshot.reading
+    colors = {'red': (0, 0, 255), 'yellow': (0, 255, 255),
+              'green': (70, 220, 70), None: (180, 180, 180)}
+    labels = []
+    for name, value in (('FRONT', reading.front), ('LEFT', reading.left),
+                        ('RIGHT', reading.right)):
+        text = '--' if value.distance_m is None else (
+            f'{"~" if value.held else ""}{value.distance_m / 0.3048:.1f} ft')
+        labels.append((f'{name}: {text}', colors[value.severity]))
+    near = reading.center_nearest
+    front = reading.front
+    rank = {None: 0, 'green': 1, 'yellow': 2, 'red': 3}
+    if (near.distance_m is not None and near.severity in ('red', 'yellow')
+            and (front.distance_m is None
+                 or near.distance_m + 0.05 < front.distance_m
+                 or rank[near.severity] > rank[front.severity])):
+        prefix = '~' if near.held else ''
+        labels.append((f'NEAR: {prefix}{near.distance_m / 0.3048:.1f} ft',
+                       colors[near.severity]))
+    if reading.coverage_uncertain:
+        labels.append(('LIDAR COVERAGE UNKNOWN', (0, 180, 255)))
+    return labels
+
+
+def draw_turn_indicator(img, bearing):
+    direction = 'RIGHT' if bearing >= 0 else 'LEFT'
+    text = f'TURN {direction} {abs(bearing):.0f}'
+    scale, thickness = 0.4, 1
+    (width, height), baseline = cv2.getTextSize(
+        text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+    x, y = 7, 7 + height
+    cv2.rectangle(img, (4, 4), (x + width + 7, y + baseline + 2), (0, 0, 0), -1)
+    cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX,
+                scale, (0, 255, 255), thickness, cv2.LINE_AA)
+    cv2.circle(img, (x + width + 3, y - height + 2), 2, (0, 255, 255), 1)
+
+
+def draw_lidar(img, snapshot, top=4):
+    """Draw compact labels at the upper right, without adding mouse hitboxes."""
+    height, width = img.shape[:2]
+    if width < 100 or height < 60:
+        return
+    labels = lidar_labels(snapshot)
+    available = max(1, height // 2 - top)
+    scale = min(0.6, max(0.25, width / 1000), max(0.25, available / (25 * len(labels))))
+    thickness = 1 if scale < 0.5 else 2
+    sizes = [cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)[0]
+             for text, _ in labels]
+    row = max(size[1] for size in sizes) + 7
+    for i, ((text, color), (text_width, text_height)) in enumerate(
+            zip(labels, sizes)):
+        x = max(0, width - text_width - 10)
+        y = top + i * row
+        cv2.rectangle(img, (x, y), (width - 1, min(height - 1, y + row - 1)),
+                      (0, 0, 0), -1)
+        cv2.putText(img, text, (x + 4, y + text_height + 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
+
+
 def scale_rear(rear, front_w, front_h, scale):
     """Fit the rear image in scale*front size, keeping its aspect ratio."""
     box_w = max(1, int(round(front_w * scale)))
@@ -202,6 +290,41 @@ def display_sized_image(image, window_name):
     return cv2.resize(image, size, interpolation=cv2.INTER_LINEAR)
 
 
+def directional_speeds(selected, settings):
+    linear = min(selected, settings['linear_limit_mps'])
+    angular = min(2.0 * linear / settings['wheel_separation_m'],
+                  settings['angular_limit_rps'])
+    return linear, angular
+
+
+def validate_directional_settings(settings):
+    if (not all(math.isfinite(value) and value > 0 for value in settings.values())
+            or settings['min_speed_mps'] >= settings['max_speed_mps']):
+        raise ValueError('Invalid directional speeds or wheel separation')
+
+
+def window_has_focus(name):
+    app = QApplication.instance()
+    if app is None:
+        return False
+    return any(widget.windowTitle() == name and widget.isActiveWindow()
+               for widget in app.topLevelWidgets())
+
+
+class MotionWindowEvents(QObject):
+    def __init__(self, viewer):
+        super().__init__()
+        self.viewer = viewer
+
+    def eventFilter(self, watched, event):
+        if (event.type() in (QEvent.Leave, QEvent.WindowDeactivate, QEvent.Close)
+                and isinstance(watched, QWidget)):
+            window = self.viewer.combined_window if self.viewer.show_side_by_side else self.viewer.window_left
+            if watched.window().windowTitle() == window:
+                self.viewer._manual_stop()
+        return False
+
+
 class DualCompressedViewer(Node):
 
     def __init__(self):
@@ -244,8 +367,19 @@ class DualCompressedViewer(Node):
         self._panel_origin = (0, 0)
         self._source_menu = False
         self._rear_window_ready = False
+        for name, default in LIDAR_DEFAULTS.items():
+            self.declare_parameter(name, default)
+        lidar_settings = {name.removeprefix('lidar.'):
+                          self.get_parameter(name).value
+                          for name in LIDAR_DEFAULTS}
+        self.lidar = None
+        if settings['enabled'] or lidar_settings['enabled']:
+            self.tf_buffer = Buffer()
+            self.tf_listener = TransformListener(self.tf_buffer, self)
         if settings['enabled']:
             self._init_telemetry(settings)
+        if lidar_settings['enabled']:
+            self._init_lidar(lidar_settings)
 
         self.topic_left = self.get_parameter('topic_left').value
         self.topic_right = self.get_parameter('topic_right').value
@@ -290,6 +424,30 @@ class DualCompressedViewer(Node):
         self.declare_parameter('click.enable_motion', False)
         self.click_enable_motion = bool(self.get_parameter('click.enable_motion').value)
         self._click_client = self.create_client(ClickDrive, '/click_drive')
+        for name, default in DIRECTIONAL_DEFAULTS.items():
+            self.declare_parameter(name, default)
+        self.declare_parameter('directional.enable_motion', True)
+        self.directional_enable_motion = bool(
+            self.get_parameter('directional.enable_motion').value)
+        self.directional_settings = {
+            name.removeprefix('directional.'): float(self.get_parameter(name).value)
+            for name in DIRECTIONAL_DEFAULTS
+        }
+        d = self.directional_settings
+        validate_directional_settings(d)
+        self.directional_speed = min(d['max_speed_mps'], max(
+            d['min_speed_mps'], d['default_speed_mps']))
+        self._viewer_id = uuid.uuid4().hex
+        self._viewer_sequence = 0
+        self._manual_client = self.create_client(ClickDrive, '/click_drive')
+        self._manual_button = None
+        self._manual_future = None
+        self._manual_kind = None
+        self._manual_future_started = 0.0
+        self._manual_owned = False
+        self._manual_last_send = 0.0
+        self._directional_hits = {}
+        self._slider_dragging = False
         self._click_future = None
         self._click_request_kind = None
         self._click_last_status = 0.0
@@ -324,6 +482,15 @@ class DualCompressedViewer(Node):
             cv2.WINDOW_NORMAL
         )
         cv2.setMouseCallback(self.combined_window, self._on_mouse)
+        app = QApplication.instance()
+        self._motion_window_events = None
+        if app is None:
+            self.directional_enable_motion = False
+            self.get_logger().warning(
+                'Directional motion disabled: Qt window events unavailable')
+        else:
+            self._motion_window_events = MotionWindowEvents(self)
+            app.installEventFilter(self._motion_window_events)
 
         # resizeWindow() will be called once after the first real
         # composite image is available. This restores the natural
@@ -374,8 +541,6 @@ class DualCompressedViewer(Node):
         self._panel_period = 1.0 / refresh
         self._missing_joints = set()
         self._tf_seen = {}
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
         self.telemetry_subscriptions = [
             self.create_subscription(TwistStamped, settings['command_topic'],
                                      self._on_command, 10),
@@ -391,6 +556,47 @@ class DualCompressedViewer(Node):
                                      self._on_health, 10),
         ]
         self.create_timer(1.0 / refresh, self._refresh_poses)
+
+    def _init_lidar(self, settings):
+        self.lidar_config = LidarConfig(**{
+            name: settings[name] for name in LidarConfig.__dataclass_fields__
+        })
+        if not isinstance(settings['topic'], str) or not settings['topic']:
+            raise ValueError('LiDAR topic must not be empty')
+        self.lidar = LidarState(self.lidar_config)
+        self._lidar_last_error = None
+        self.lidar_subscription = self.create_subscription(
+            LaserScan, settings['topic'], self._on_scan, qos_profile_sensor_data)
+        self.get_logger().info(f"Subscribing LiDAR: {settings['topic']}")
+
+    def _on_scan(self, msg):
+        received = time.monotonic()
+        try:
+            stamp = Time.from_msg(msg.header.stamp)
+            if not msg.header.frame_id or stamp.nanoseconds <= 0:
+                raise ValueError('Scan has no frame ID or timestamp')
+            age = (self.get_clock().now().nanoseconds - stamp.nanoseconds) * 1e-9
+            if age > self.lidar_config.stale_timeout_s:
+                self.lidar.unavailable('stale')
+                if self._lidar_last_error != 'stale':
+                    self.get_logger().warning(f'LiDAR scan is stale (age {age:.3f}s)')
+                    self._lidar_last_error = 'stale'
+                return
+            if age < 0:
+                raise ValueError(f'Scan timestamp is in the future (age {age:.3f}s)')
+            transform = self.tf_buffer.lookup_transform(
+                'base_link', msg.header.frame_id, stamp)
+            reading = process_scan(msg, transform.transform, self.lidar_config)
+            self.lidar.put(reading, received - age)
+            if self._lidar_last_error is not None:
+                self.get_logger().info('LiDAR scan processing recovered')
+                self._lidar_last_error = None
+        except (TransformException, ValueError) as exc:
+            status = 'TF unavailable' if isinstance(exc, TransformException) else 'unavailable'
+            self.lidar.unavailable(status)
+            if self._lidar_last_error != status:
+                self.get_logger().warning(f'LiDAR {status}: {exc}')
+                self._lidar_last_error = status
 
     def _on_command(self, msg):
         values = (msg.twist.linear.x, msg.twist.angular.z)
@@ -495,19 +701,108 @@ class DualCompressedViewer(Node):
         if not self._click_client.service_is_ready():
             self.click_message = 'ClickDrive service unavailable'
             return False
-        request = ClickDrive.Request()
-        request.command = command
+        request = self._viewer_request(command)
         request.angle_deg = float(angle)
         request.distance_m = float(distance)
         self._click_future = self._click_client.call_async(request)
         self._click_request_kind = command
         return True
 
+    def _viewer_request(self, command):
+        request = ClickDrive.Request()
+        self._viewer_sequence += 1
+        request.client_id = self._viewer_id
+        request.sequence = self._viewer_sequence
+        request.deadline_ros_s = self.get_clock().now().nanoseconds * 1e-9 + 0.25
+        request.command = command
+        request.linear_speed_mps, request.angular_speed_rps = directional_speeds(
+            self.directional_speed, self.directional_settings)
+        return request
+
+    def _manual_send(self, command):
+        if not self._manual_client.service_is_ready():
+            self.click_message = 'Motion service unavailable'
+            return False
+        request = self._viewer_request(command)
+        if command == 'MANUAL':
+            request.linear_direction, request.angular_direction = {
+                'FORWARD': (1, 0), 'REVERSE': (-1, 0),
+                'LEFT': (0, 1), 'RIGHT': (0, -1),
+            }[self._manual_button]
+        future = self._manual_client.call_async(request)
+        if command != 'MANUAL_END':
+            self._manual_future = future
+            self._manual_kind = command
+            self._manual_future_started = time.monotonic()
+        return True
+
+    def _manual_stop(self):
+        if self._manual_button is not None or self._manual_owned:
+            self._manual_button = None
+            self._manual_owned = False
+            self._manual_send('MANUAL_END')
+        self._manual_future = None
+        self._manual_kind = None
+
+    def _manual_press(self, name):
+        self._manual_stop()
+        self._click_future = None
+        self._click_request_kind = None
+        self.selected_target = None
+        self.click_state = 'idle'
+        self.click_distance_edit = False
+        self.click_message = 'Manual takeover requested'
+        if not self.directional_enable_motion:
+            self.click_message = 'TEST MODE: motion disabled'
+            return
+        self._manual_button = name
+        if not self._manual_send('MANUAL_BEGIN'):
+            self._manual_button = None
+
+    def _manual_tick(self):
+        if self._manual_button is None:
+            return
+        window = self.combined_window if self.show_side_by_side else self.window_left
+        if not window_has_focus(window):
+            self.click_message = 'Manual stopped: window not focused'
+            self._manual_stop()
+            return
+        now = time.monotonic()
+        if self._manual_future is not None:
+            if self._manual_future.done():
+                future, kind = self._manual_future, self._manual_kind
+                self._manual_future = None
+                try:
+                    response = future.result()
+                except Exception as exc:
+                    self.click_message = f'Manual service error: {exc}'
+                    self._manual_stop()
+                    return
+                if not response.accepted:
+                    self.click_message = f'Manual rejected: {response.message}'
+                    self._manual_stop()
+                    return
+                if kind == 'MANUAL_BEGIN':
+                    self._manual_owned = True
+                    self.click_message = 'Manual control'
+            elif now - self._manual_future_started > 0.2:
+                self.click_message = 'Manual service timeout'
+                self._manual_stop()
+                return
+        if (self._manual_owned and self._manual_future is None
+                and now - self._manual_last_send >= 0.08):
+            if self._manual_send('MANUAL'):
+                self._manual_last_send = now
+            else:
+                self._manual_stop()
+
     def _click_turn(self):
+        if self._manual_button is not None:
+            return
         if self.click_state != 'selected' or self.selected_target is None:
             return
         if not self.click_enable_motion:
-            self.click_message = 'TEST MODE: TURN not sent (click.enable_motion=false)'
+            self.click_message = 'CLICK MOTION DISABLED'
             return
         if self._click_request('TURN', self.selected_target[2]):
             self.click_state = 'turning'
@@ -528,6 +823,8 @@ class DualCompressedViewer(Node):
                 self._click_request('STOP')
 
     def _click_go(self):
+        if self._manual_button is not None:
+            return
         if self.click_state != 'ready' or self._click_future is not None:
             return
         try:
@@ -539,7 +836,7 @@ class DualCompressedViewer(Node):
             self.click_message = 'Distance must be 0.1 to 5.0 m'
             return
         if not self.click_enable_motion:
-            self.click_message = 'TEST MODE: DRIVE not sent'
+            self.click_message = 'CLICK MOTION DISABLED'
             return
         if self._click_request('DRIVE', distance=distance):
             self.click_state = 'driving'
@@ -607,46 +904,61 @@ class DualCompressedViewer(Node):
                 self._click_last_status = time.monotonic()
 
     def _click_drive_buttons(self, canvas, front_w, front_h):
-        """Draw buttons in displayed pixel coordinates; cache hitboxes."""
+        """Draw the two-column motion panel and cache displayed hitboxes."""
         self._click_button_hits = {}
-        if self.selected_target is None and self.click_state == 'idle':
-            return
+        self._directional_hits = {}
         w = min(front_w, canvas.shape[1])
         h = min(front_h, canvas.shape[0])
-        if w < 150 or h < 75:
+        if w < 280 or h < 150:
             return
-        margin = 8
-        gap = 8
-        button_w = max(60, (w - 2 * margin - gap) // 2)
-        button_h = 34
-        y0 = h - button_h - margin
-        if self.click_state == 'ready':
-            # Click the distance field and type a new number; Enter finishes.
-            field_y0 = max(36, y0 - 40)
-            field_y1 = y0 - 5
-            cv2.rectangle(canvas, (margin, field_y0), (w-margin, field_y1),
-                          (70, 70, 70) if self.click_distance_edit else (35, 35, 35), -1)
-            cv2.rectangle(canvas, (margin, field_y0), (w-margin, field_y1),
-                          (255, 255, 255), 1)
-            label = f'Distance: {self.click_distance_text} m' + ('  [typing]' if self.click_distance_edit else '  [click to edit]')
-            cv2.putText(canvas, label[:38], (margin+7, field_y0+22),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255,255,255), 1)
-            self._click_button_hits['DISTANCE'] = (margin, field_y0, w-margin, field_y1)
-        for name, x0, color in (
-            ('GO' if self.click_state == 'ready' else 'TURN', margin, (35, 135, 35)),
-            ('CANCEL', margin + button_w + gap, (35, 35, 180)),
-        ):
-            x1 = min(x0 + button_w, w - margin)
-            y1 = y0 + button_h
+        top = h - 140
+        mid = w // 2
+        cv2.rectangle(canvas, (0, top), (w - 1, h - 1), (35, 35, 35), -1)
+        cv2.line(canvas, (mid, top), (mid, h - 1), (130, 130, 130), 1)
+
+        def text(value, x, y, color=(235, 235, 235)):
+            cv2.putText(canvas, value, (x, y), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.36, color, 1, cv2.LINE_AA)
+
+        def button(label, box, hits, key, color=(70, 70, 70)):
+            x0, y0, x1, y1 = box
             cv2.rectangle(canvas, (x0, y0), (x1, y1), color, -1)
-            cv2.rectangle(canvas, (x0, y0), (x1, y1), (220, 220, 220), 1)
-            label = 'STOP' if name == 'CANCEL' and self.click_state in ('turning', 'driving', 'stopping') else name
-            cv2.putText(canvas, label, (x0 + 9, y0 + 23),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2)
-            self._click_button_hits[name] = (x0, y0, x1, y1)
-        if self.click_message:
-            cv2.putText(canvas, self.click_message[:55], (8, max(45, y0 - 12)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 255), 1)
+            cv2.rectangle(canvas, (x0, y0), (x1, y1), (200, 200, 200), 1)
+            text(label, x0 + 4, y0 + 15)
+            hits[key] = box
+
+        text('CLICK TO DRIVE', 6, top + 15)
+        angle = '--' if self.selected_target is None else f'{self.selected_target[2]:+.0f} deg'
+        text('Turn: ' + angle, 6, top + 31)
+        bw = max(48, (mid - 22) // 2)
+        if self.selected_target is not None or self.click_state != 'idle':
+            button('GO' if self.click_state == 'ready' else 'TURN',
+                   (6, top + 39, 6 + bw, top + 60), self._click_button_hits,
+                   'GO' if self.click_state == 'ready' else 'TURN', (35, 135, 35))
+            button('CANCEL', (12 + bw, top + 39, 12 + 2 * bw, top + 60),
+                   self._click_button_hits, 'CANCEL', (35, 35, 180))
+        if self.click_state == 'ready':
+            button(f'DIST: {self.click_distance_text} m',
+                   (6, top + 65, mid - 6, top + 86), self._click_button_hits, 'DISTANCE')
+        text(self.click_message[:max(1, (mid - 12) // 7)], 6, top + 105, (0, 255, 255))
+        text('DIRECTIONAL', mid + 6, top + 15)
+        center = mid + (w - mid) // 2
+        for label, key, dx, dy in (
+                ('FWD', 'FORWARD', 0, 0), ('LEFT', 'LEFT', -48, 23),
+                ('RIGHT', 'RIGHT', 48, 23), ('REV', 'REVERSE', 0, 46)):
+            button(label, (center + dx - 21, top + 19 + dy,
+                           center + dx + 21, top + 39 + dy),
+                   self._directional_hits, key)
+        actual, _ = directional_speeds(self.directional_speed, self.directional_settings)
+        text(f'SPEED: {self.directional_speed:.1f} / {actual:.1f} m/s', mid + 6, top + 111)
+        x0, x1 = mid + 10, w - 10
+        y = top + 128
+        cv2.line(canvas, (x0, y), (x1, y), (220, 220, 220), 2)
+        d = self.directional_settings
+        fraction = (self.directional_speed - d['min_speed_mps']) / (
+            d['max_speed_mps'] - d['min_speed_mps'])
+        cv2.circle(canvas, (round(x0 + fraction * (x1 - x0)), y), 5, (0, 255, 255), -1)
+        self._directional_hits['SLIDER'] = (x0, y - 9, x1, y + 9)
 
     def _click_handle_button(self, x, y):
         for name, (x0, y0, x1, y1) in self._click_button_hits.items():
@@ -666,6 +978,8 @@ class DualCompressedViewer(Node):
 
     def _select_front_target(self, x, y):
         """Select a point in displayed front-image coordinates."""
+        if self._manual_button is not None:
+            return
         if self.front_display_size is None or self.front_native_size is None:
             return
 
@@ -691,7 +1005,7 @@ class DualCompressedViewer(Node):
             return
         self.selected_target = (pixel_x, pixel_y, bearing)
         self.click_state = 'selected'
-        self.click_message = ('TEST MODE: motion disabled' if not self.click_enable_motion
+        self.click_message = ('CLICK MOTION DISABLED' if not self.click_enable_motion
                               else 'Select TURN or CANCEL')
 
         direction = 'RIGHT' if bearing > 0 else 'LEFT'
@@ -700,13 +1014,60 @@ class DualCompressedViewer(Node):
             f'bearing={bearing:+.2f} deg ({direction})'
         )
 
+    def _handle_motion_mouse(self, event, x, y, flags):
+        hits = self._directional_hits
+        if event == cv2.EVENT_LBUTTONUP:
+            self._slider_dragging = False
+            if self._manual_button is not None:
+                self._manual_stop()
+                return True
+        if event == cv2.EVENT_MOUSEMOVE:
+            if self._manual_button is not None:
+                box = hits.get(self._manual_button)
+                if (not flags & cv2.EVENT_FLAG_LBUTTON or box is None
+                        or not (box[0] <= x < box[2] and box[1] <= y < box[3])):
+                    self._manual_stop()
+                return True
+            if self._slider_dragging:
+                if not flags & cv2.EVENT_FLAG_LBUTTON:
+                    self._slider_dragging = False
+                    return True
+                self._set_slider(x)
+                return True
+        if event == cv2.EVENT_LBUTTONDOWN:
+            for name, (x0, y0, x1, y1) in hits.items():
+                if x0 <= x < x1 and y0 <= y < y1:
+                    if name == 'SLIDER':
+                        self._slider_dragging = True
+                        self._set_slider(x)
+                    else:
+                        self._manual_press(name)
+                    return True
+        return False
+
+    def _set_slider(self, x):
+        x0, _, x1, _ = self._directional_hits['SLIDER']
+        d = self.directional_settings
+        ratio = max(0.0, min(1.0, (x - x0) / (x1 - x0)))
+        value = d['min_speed_mps'] + ratio * (d['max_speed_mps'] - d['min_speed_mps'])
+        self.directional_speed = min(d['max_speed_mps'], max(
+            d['min_speed_mps'], round(value * 10) / 10))
+
     def _on_front_mouse(self, event, x, y, _flags, _userdata):
         """Mouse callback for the separate front-camera window."""
+        if self._handle_motion_mouse(event, x, y, _flags):
+            return
         if event == cv2.EVENT_LBUTTONUP:
+            if (self._directional_hits and self.front_display_size
+                    and y >= self.front_display_size[1] - 140):
+                self._click_handle_button(x, y)
+                return
             if not self._click_handle_button(x, y):
                 self._select_front_target(x, y)
 
     def _on_mouse(self, event, x, y, _flags, _userdata):
+        if self._handle_motion_mouse(event, x, y, _flags):
+            return
         if event != cv2.EVENT_LBUTTONUP:
             return
 
@@ -714,10 +1075,20 @@ class DualCompressedViewer(Node):
         if self.front_display_size is not None:
             fw, fh = self.front_display_size
             if 0 <= x < fw and 0 <= y < fh:
+                if self._directional_hits and y >= fh - 140:
+                    self._click_handle_button(x, y)
+                    return
                 if not self._click_handle_button(x, y):
                     self._select_front_target(x, y)
                 return
 
+        self._on_dashboard_mouse(x, y)
+
+    def _on_rear_mouse(self, event, x, y, _flags, _userdata):
+        if event == cv2.EVENT_LBUTTONUP:
+            self._on_dashboard_mouse(x, y)
+
+    def _on_dashboard_mouse(self, x, y):
         # Existing dashboard controls remain unchanged.
         if not self.telemetry:
             return
@@ -791,6 +1162,7 @@ class DualCompressedViewer(Node):
         self.right_msg_count += 1
 
     def draw(self):
+        self._manual_tick()
         now = time.time()
 
         if self.max_display_hz > 0.0:
@@ -850,6 +1222,9 @@ class DualCompressedViewer(Node):
                 2
             )
 
+        if self.lidar:
+            draw_lidar(left, self.lidar.snapshot(),
+                       top=35 if self.selected_target is not None else 4)
         draw_markers(left, self.overlay)
 
         if self.selected_target is not None:
@@ -861,17 +1236,7 @@ class DualCompressedViewer(Node):
                 cv2.MARKER_CROSS, 16, 2
             )
 
-            direction = 'RIGHT' if bearing >= 0 else 'LEFT'
-            label = f'{direction} {abs(bearing):.1f} deg'
-
-            cv2.rectangle(
-                left, (4, 4), (225, 31), (0, 0, 0), -1
-            )
-            cv2.putText(
-                left, label, (10, 24),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.65, (0, 255, 255), 2
-            )
+            draw_turn_indicator(left, bearing)
 
         self.front_native_size = (left.shape[1], left.shape[0])
 
@@ -885,7 +1250,7 @@ class DualCompressedViewer(Node):
                 right_canvas[:right.shape[0], :right.shape[1]] = right
                 if not self._rear_window_ready:
                     cv2.namedWindow(self.window_right, cv2.WINDOW_NORMAL)
-                    cv2.setMouseCallback(self.window_right, self._on_mouse)
+                    cv2.setMouseCallback(self.window_right, self._on_rear_mouse)
                     self._rear_window_ready = True
                 right_canvas = display_sized_image(right_canvas, self.window_right)
                 panel_y = round(box_h * right_canvas.shape[0] / max(left.shape[0], box_h))
@@ -917,6 +1282,7 @@ class DualCompressedViewer(Node):
             if self.click_distance_edit:
                 self._click_distance_key(key)
             elif key == ord('q'):
+                self._manual_stop()
                 rclpy.shutdown()
 
             return
@@ -929,6 +1295,7 @@ class DualCompressedViewer(Node):
             self.combined_window,
             cv2.WND_PROP_VISIBLE
         ) < 1:
+            self._manual_stop()
             rclpy.shutdown()
             return
 
@@ -985,10 +1352,15 @@ class DualCompressedViewer(Node):
         if self.click_distance_edit:
             self._click_distance_key(key)
         elif key == ord('q'):
+            self._manual_stop()
             rclpy.shutdown()
 
     def destroy_node(self):
 
+        self._manual_stop()
+        app = QApplication.instance()
+        if app is not None and self._motion_window_events is not None:
+            app.removeEventFilter(self._motion_window_events)
         try:
             cv2.destroyAllWindows()
         except Exception:
@@ -1041,6 +1413,7 @@ def main(args=None):
 
     finally:
 
+        node._manual_stop()
         executor.shutdown(timeout_sec=2.0)
         spin_thread.join(timeout=2.0)
         executor.remove_node(node)
