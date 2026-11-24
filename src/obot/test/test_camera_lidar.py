@@ -373,14 +373,19 @@ def test_draw_in_both_window_modes_preserves_markers_and_mouse_setup(monkeypatch
         selected_target=None, show_side_by_side=combined, telemetry=None,
         window_left='front', window_right='rear', combined_window='combined',
         _on_front_mouse=Mock(), _window_sized=True, _window_maximize_attempted=True,
-        _click_poll=Mock(), _click_drive_buttons=Mock(), _manual_tick=Mock(), waitkey_ms=1,
+        _click_poll=Mock(), _click_drive_buttons=Mock(),
+        spray=Mock(), _spray_panel=None, _spray_hits={},
+        _manual_tick=Mock(), waitkey_ms=1,
         click_distance_edit=False)
+    viewer.spray.snapshot.return_value = ('CLOSED', False, None, '')
+    viewer._draw_spray = DualCompressedViewer._draw_spray.__get__(viewer)
     DualCompressedViewer.draw(viewer)
     image = shown['combined' if combined else 'front']
     assert image[:100, :640].any()
     assert tuple(image[240, 320]) == (0, 255, 0)
     assert viewer.front_display_size == (640, 480)
     viewer._click_drive_buttons.assert_called_once()
+    assert set(viewer._spray_hits) == {'square', 'circle', 'triangle', 'cancel'}
 
 
 def test_invalid_config_and_transform_raise_explicit_errors():

@@ -99,6 +99,7 @@ The repository's `bin/obot-view2cams` uses defaults instead. For an explicit
 startup without relying on the machine-local script:
 
     source /opt/ros/jazzy/setup.bash
+    source ~/Workspaces/obot-robot/install/setup.bash
     source ~/Workspaces/obot_ws/install/setup.bash
     ros2 run obot view2cams --ros-args \
       -p click.enable_motion:=true \
@@ -112,14 +113,25 @@ requested speed. Selecting a target does not move the robot: select TURN to
 rotate, then enter a distance and select GO. CANCEL stops or cancels the
 operation. The directional diamond takes priority over click-to-drive.
 
+The front view's SPRAY panel uses square, circle and triangle icons for the
+corresponding server-configured timed sprays; the X icon cancels a spray
+started by this viewer. The displayed valve state is the robot's commanded
+state, not physical position feedback. Stale state shows UNKNOWN. The server
+accepts one spray at a time; it can reject a request while another client owns
+an active spray. The viewer cannot cancel a goal started by the PS4 client.
+Build and source the robot workspace's `obot_valve_interfaces` package before
+starting the viewer. If it is unavailable, camera and motion functions remain
+available but the spray panel reports DEPENDENCY MISSING. The repository
+`obot-view2cams` script sources the robot workspace if present; machine-local
+copies may need updating separately.
+
 These changes require matching rebuilt `obot_msgs` interfaces and the updated
 motion node on the robot and viewer on the laptop. The revised service is not
 wire-compatible with the previous `ClickDrive` service. Motion requests have a
 short ROS-time deadline, so robot and laptop clocks must be synchronized; late
 requests are rejected. The revised interface and motion node were deployed to
 pi-bot-2, and the directional controls were exercised on the robot. Test stop
-and takeover behavior in a controlled setting before use. `obot-view2cams`
-itself requires no changes.
+and takeover behavior in a controlled setting before use.
 
 ### LiDAR operator overlay
 

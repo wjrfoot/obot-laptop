@@ -2,6 +2,11 @@
 set -e
 
 source /opt/ros/jazzy/setup.bash
+if [ -f "$HOME/Workspaces/obot-robot/install/setup.bash" ]; then
+    source "$HOME/Workspaces/obot-robot/install/setup.bash"
+else
+    echo "Warning: robot workspace not found; spray controls may be unavailable." >&2
+fi
 source "$HOME/Workspaces/obot_ws/install/setup.bash"
 
 exec ros2 run obot view2cams

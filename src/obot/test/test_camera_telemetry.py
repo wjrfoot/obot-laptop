@@ -376,7 +376,8 @@ def test_clear_button_click_does_not_reset_origin():
         telemetry=state, _panel_origin=(10, 20),
         _panel_hits={'clear': (100, 50, 150, 70)},
         _clear_path=Mock(), _panel_time=1.0,
-        front_display_size=None, _handle_motion_mouse=Mock(return_value=False))
+        front_display_size=None, _handle_motion_mouse=Mock(return_value=False),
+        _handle_spray_mouse=Mock(return_value=False))
     viewer._on_dashboard_mouse = lambda x, y: DualCompressedViewer._on_dashboard_mouse(
         viewer, x, y)
     DualCompressedViewer._on_mouse(

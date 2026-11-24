@@ -28,6 +28,7 @@ from PyQt5.QtWidgets import QApplication, QWidget
 from .fisheye_bearing import FisheyeBearing
 from .camera_dashboard import render_dashboard
 from .camera_lidar import LidarConfig, LidarState, process_scan
+from .camera_spray import SprayControl, draw_spray_panel
 from .camera_telemetry import Telemetry, wheel_speeds, yaw_from_quaternion
 
 
@@ -321,6 +322,7 @@ class MotionWindowEvents(QObject):
                 and isinstance(watched, QWidget)):
             window = self.viewer.combined_window if self.viewer.show_side_by_side else self.viewer.window_left
             if watched.window().windowTitle() == window:
+                self.viewer._spray_down = None
                 self.viewer._manual_stop()
         return False
 
@@ -453,6 +455,18 @@ class DualCompressedViewer(Node):
         self._click_last_status = 0.0
         self._click_turn_started = 0.0
         self._click_button_hits = {}
+        self._spray_panel = None
+        self._spray_hits = {}
+        self._spray_down = None
+        try:
+            self.spray = SprayControl(self)
+        except ModuleNotFoundError as exc:
+            if exc.name != 'obot_valve_interfaces':
+                raise
+            self.spray = None
+            self.get_logger().error(
+                'Spray controls unavailable: source the robot workspace '
+                'containing obot_valve_interfaces before starting the viewer')
         self.front_display_size = None
         self.front_native_size = None
 
@@ -1053,9 +1067,39 @@ class DualCompressedViewer(Node):
         self.directional_speed = min(d['max_speed_mps'], max(
             d['min_speed_mps'], round(value * 10) / 10))
 
+    def _handle_spray_mouse(self, event, x, y):
+        panel = self._spray_panel
+        if panel is None:
+            return False
+        inside = panel[0] <= x < panel[2] and panel[1] <= y < panel[3]
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self._spray_down = next(
+                (name for name, box in self._spray_hits.items()
+                 if box[0] <= x < box[2] and box[1] <= y < box[3]), None)
+            return inside
+        if event == cv2.EVENT_LBUTTONUP:
+            name, self._spray_down = self._spray_down, None
+            box = self._spray_hits.get(name)
+            if (self.spray is not None and box is not None
+                    and box[0] <= x < box[2] and box[1] <= y < box[3]):
+                if name == 'cancel':
+                    self.spray.cancel()
+                else:
+                    self.spray.start({'circle': 0, 'square': 1, 'triangle': 2}[name])
+            return inside or name is not None
+        return inside
+
+    def _draw_spray(self, canvas):
+        snapshot = (self.spray.snapshot() if self.spray is not None
+                    else ('UNKNOWN', False, None, 'DEPENDENCY MISSING'))
+        self._spray_panel, self._spray_hits = draw_spray_panel(
+            canvas, *self.front_display_size, snapshot, available=self.spray is not None)
+
     def _on_front_mouse(self, event, x, y, _flags, _userdata):
         """Mouse callback for the separate front-camera window."""
         if self._handle_motion_mouse(event, x, y, _flags):
+            return
+        if self._handle_spray_mouse(event, x, y):
             return
         if event == cv2.EVENT_LBUTTONUP:
             if (self._directional_hits and self.front_display_size
@@ -1067,6 +1111,8 @@ class DualCompressedViewer(Node):
 
     def _on_mouse(self, event, x, y, _flags, _userdata):
         if self._handle_motion_mouse(event, x, y, _flags):
+            return
+        if self._handle_spray_mouse(event, x, y):
             return
         if event != cv2.EVENT_LBUTTONUP:
             return
@@ -1265,6 +1311,7 @@ class DualCompressedViewer(Node):
             )
             self._click_poll()
             self._click_drive_buttons(left, *self.front_display_size)
+            self._draw_spray(left)
             cv2.imshow(
                 self.window_left,
                 left
@@ -1333,6 +1380,7 @@ class DualCompressedViewer(Node):
 
         self._click_poll()
         self._click_drive_buttons(combo, *self.front_display_size)
+        self._draw_spray(combo)
         cv2.imshow(
             self.combined_window,
             combo
