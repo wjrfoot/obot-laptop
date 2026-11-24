@@ -131,8 +131,11 @@ motion node on the robot and viewer on the laptop. The revised service is not
 wire-compatible with the previous `ClickDrive` service. Motion requests have a
 short ROS-time deadline, so robot and laptop clocks must be synchronized; late
 requests are rejected. The revised interface and motion node were deployed to
-pi-bot-2, and the directional controls were exercised on the robot. Test stop
-and takeover behavior in a controlled setting before use.
+pi-bot-2. On 2026-11-23, live operational testing on OBot-2 confirmed that
+the viewer's valve controls, directional diamond, speed slider, TURN, CANCEL
+and GO worked, and motion used the selected slider speed. This is the
+operator's reported result for that test, not a certification of all operating
+conditions.
 
 ### LiDAR operator overlay
 
@@ -404,13 +407,25 @@ Configure the recorder's durations to match the spray setup in use.
 
 ## Build
 
-Use a fresh shell without either workspace sourced, so the robot workspace is
-not recorded as a laptop underlay:
+On the laptop, build in a clean environment with only ROS sourced. Do **not**
+source the robot workspace or its valve-interface package hook before running
+colcon: colcon interprets the interface's isolated `AMENT_PREFIX_PATH` entry
+as its entire parent workspace and records that workspace as an underlay.
+The viewer needs the valve interface at runtime, not to build `obot`; the
+launcher sources the interface hook after the build.
 
-    cd ~/Workspaces/obot_ws
-    source /opt/ros/jazzy/setup.bash
-    colcon build --symlink-install
-    source install/setup.bash
+    env -i HOME="$HOME" USER="$USER" PATH=/usr/local/bin:/usr/bin:/bin \
+      bash --noprofile --norc -c '
+        set -e
+        source /opt/ros/jazzy/setup.bash
+        cd "$HOME/Workspaces/obot_ws"
+        colcon build --symlink-install
+      '
+
+Run this command again for subsequent builds. It also regenerates the
+workspace setup chain without a previously recorded robot underlay. Start the
+viewer using `obot-view2cams` in the normal operator environment; the clean
+build command does not change that environment's ROS network settings.
 
 ## Documentation
 
