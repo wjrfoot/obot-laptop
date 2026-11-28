@@ -4,18 +4,18 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
+from obot.camera_lidar import (
+    center_distance, corridor_hazards, corridor_obstacle_blobs, Hazard,
+    LidarConfig, LidarReading, LidarState, process_scan, scan_points,
+)
+from obot.camera_spray import SpraySnapshot
+from obot.dual_compressed_viewer import (
+    draw_lidar, draw_turn_indicator, DualCompressedViewer, LIDAR_DEFAULTS,
+    lidar_labels, OVERLAY_DEFAULTS, OverlayConfig, TargetTrackerState,
+)
 import pytest
 from rclpy.time import Time
 from tf2_ros import TransformException
-
-from obot.camera_lidar import (
-    Hazard, LidarConfig, LidarReading, LidarState,
-    center_distance, corridor_hazards, process_scan, scan_points,
-)
-from obot.dual_compressed_viewer import (
-    DualCompressedViewer, LIDAR_DEFAULTS, OVERLAY_DEFAULTS, OverlayConfig,
-    draw_lidar, draw_turn_indicator, lidar_labels,
-)
 
 
 def scan(ranges, angle_min=0.0, angle_increment=math.radians(1)):
@@ -114,7 +114,7 @@ def test_missing_invalid_ranges_are_not_a_clear_measurement(ranges):
     assert result.center_nearest_m is None
     assert result.coverage_uncertain
     labels = [text for text, _ in lidar_labels(displayed(result))]
-    assert labels == ['FRONT: --', 'LEFT: --', 'RIGHT: --', 'LIDAR COVERAGE UNKNOWN']
+    assert labels == ['CENTER: --', 'LIDAR COVERAGE UNKNOWN']
 
 
 def test_zero_range_is_invalid_even_when_declared_minimum_is_zero():
@@ -144,8 +144,9 @@ def full_scan(yaw, blocked):
 
 @pytest.mark.parametrize('yaw', [0.0, math.pi / 2, -math.pi / 2])
 def test_normal_scan_tolerates_scattered_invalid_returns(yaw):
-    msg = full_scan(yaw, lambda i, _: (float('inf') if i % 7 == 0 else
-                                      float('nan') if i % 11 == 0 else 3.0))
+    msg = full_scan(yaw, lambda i, _: (
+        float('inf') if i % 7 == 0 else
+        float('nan') if i % 11 == 0 else 3.0))
     reading = process_scan(msg, transform(yaw=yaw), LidarConfig())
     assert not reading.coverage_uncertain
     assert reading.center_m is not None
@@ -181,8 +182,8 @@ def test_unknown_coverage_does_not_hide_detected_hazard():
     msg = scan([0.5], angle_min=0.0)
     reading = process_scan(msg, transform(x=0.260), LidarConfig())
     assert reading.coverage_uncertain
-    labels = lidar_labels(displayed(reading))
-    assert labels[0] == ('FRONT: 1.5 ft', (0, 0, 255))
+    labels = lidar_labels(displayed(reading), 'ft')
+    assert labels[0] == ('CENTER: 1.5 ft', (0, 0, 255))
     labels = [text for text, _ in labels]
     assert labels[-1] == 'LIDAR COVERAGE UNKNOWN'
 
@@ -227,6 +228,7 @@ def test_warning_hysteresis_promotes_immediately_and_relaxes_only_above_margin()
     now = [10.0]
     cfg = LidarConfig(warning_distance_m=1.5, danger_distance_m=0.6)
     state = LidarState(cfg, clock=lambda: now[0])
+
     def update(value):
         state.put(LidarReading(value, None, None, None, False), now[0])
         return state.snapshot().reading.front
@@ -253,9 +255,9 @@ def test_missing_return_hold_is_marked_and_expires_before_scan_staleness():
     state.put(LidarReading(1, None, None, 1, False), now[0])
     now[0] = 10.1
     state.put(LidarReading(None, None, None, None, False), now[0])
-    assert lidar_labels(state.snapshot())[0][0] == 'FRONT: ~3.3 ft'
+    assert lidar_labels(state.snapshot(), 'ft')[0][0] == 'CENTER: ~3.3 ft'
     now[0] = 10.251
-    assert lidar_labels(state.snapshot())[0][0] == 'FRONT: --'
+    assert lidar_labels(state.snapshot())[0][0] == 'CENTER: --'
     assert state.snapshot().status == 'ok'
     now[0] = 10.601
     assert lidar_labels(state.snapshot())[0][0] == 'LIDAR STALE'
@@ -273,7 +275,9 @@ def test_stale_gap_and_out_of_order_updates_do_not_reuse_old_values():
     assert state.snapshot().reading.front.severity == 'green'
 
 
-@pytest.mark.parametrize(('bearing', 'expected'), [(-29.2, 'TURN LEFT 29'), (29.2, 'TURN RIGHT 29')])
+@pytest.mark.parametrize(
+    ('bearing', 'expected'),
+    [(-29.2, 'TURN LEFT 29'), (29.2, 'TURN RIGHT 29')])
 def test_turn_indicator_is_compact_and_retains_direction(monkeypatch, bearing, expected):
     import cv2
     image = np.full((200, 400, 3), 255, dtype=np.uint8)
@@ -287,10 +291,8 @@ def test_turn_indicator_is_compact_and_retains_direction(monkeypatch, bearing, e
 
 def test_center_obstacle_closer_than_median_remains_visible():
     reading = LidarReading(1.0, 0.5, None, 0.2, False)
-    labels = lidar_labels(displayed(reading))
-    assert labels == [('FRONT: 3.3 ft', (0, 255, 255)),
-                      ('LEFT: 1.6 ft', (0, 0, 255)),
-                      ('RIGHT: --', (180, 180, 180)),
+    labels = lidar_labels(displayed(reading), 'ft')
+    assert labels == [('CENTER: 3.3 ft', (0, 255, 255)),
                       ('NEAR: 0.7 ft', (0, 0, 255))]
 
 
@@ -370,14 +372,18 @@ def test_draw_in_both_window_modes_preserves_markers_and_mouse_setup(monkeypatch
         last_left=np.zeros((480, 640, 3), dtype=np.uint8),
         last_right=np.zeros((480, 640, 3), dtype=np.uint8),
         overlay=OverlayConfig(OVERLAY_DEFAULTS), lidar=state,
-        selected_target=None, show_side_by_side=combined, telemetry=None,
+        selected_target=TargetTrackerState(), show_side_by_side=combined, telemetry=None,
         window_left='front', window_right='rear', combined_window='combined',
         _on_front_mouse=Mock(), _window_sized=True, _window_maximize_attempted=True,
         _click_poll=Mock(), _click_drive_buttons=Mock(),
         spray=Mock(), _spray_panel=None, _spray_hits={},
         _manual_tick=Mock(), waitkey_ms=1,
-        click_distance_edit=False)
-    viewer.spray.snapshot.return_value = ('CLOSED', False, None, '')
+        _draw_obstacle_indicators=Mock(), _update_target_tracking=Mock(),
+        _bearing_x_lookup=[], _build_bearing_lookup=Mock(),
+        operator_units='m')
+    viewer.spray.snapshot.return_value = SpraySnapshot(
+        state='CLOSED', active=False, remaining=None, message='',
+        durations={'circle': 4.0, 'square': 2.0, 'triangle': 0.0})
     viewer._draw_spray = DualCompressedViewer._draw_spray.__get__(viewer)
     DualCompressedViewer.draw(viewer)
     image = shown['combined' if combined else 'front']
@@ -395,3 +401,23 @@ def test_invalid_config_and_transform_raise_explicit_errors():
     bad.rotation.w = 0.0
     with pytest.raises(ValueError):
         scan_points(scan([1.0]), bad)
+
+
+def test_obstacle_blobs_group_adjacent_returns_and_apply_thresholds():
+    cfg = LidarConfig(front_bumper_x_m=0.0, warning_distance_m=2.0, danger_distance_m=1.0)
+    points = [
+        (0.9, 0.02), (0.95, 0.03),   # red center group
+        (1.6, 0.20), (1.7, 0.24),    # yellow left group
+        (3.0, 0.0),                  # outside warning threshold
+    ]
+    blobs = corridor_obstacle_blobs(points, cfg, 2.0, 1.0)
+    assert len(blobs) == 2
+    severities = [blob.severity for blob in blobs]
+    assert severities == ['red', 'yellow']
+    assert blobs[0].nearest_m == pytest.approx(0.9)
+
+
+def test_obstacle_blob_threshold_validation():
+    cfg = LidarConfig()
+    with pytest.raises(ValueError):
+        corridor_obstacle_blobs([(1.0, 0.0)], cfg, 0.0, 1.0)

@@ -67,22 +67,39 @@ Point-and-click/point-and-turn is the preferred manual operating interface.
 Operational testing found tank steering less satisfactory than anticipated;
 the PS4 remains available as an optional alternative.
 
-The lower front-camera overlay contains click-to-drive controls on the left and
-hold-to-move controls on the right. Releasing a direction, moving outside its
-button, or losing window focus requests a stop. A directional press cancels
-the current click motion and waits for acknowledgement before moving; canceled
-motions do not resume. The robot-side motion node remains the sole publisher
-to its configured `twist_mux` input. A short manual-command lease stops
-refreshing motion if the viewer or communication stops. Joystick priority and
-the deployed watchdog behavior are unchanged.
+The lower front-camera overlay contains enlarged click-to-drive controls on the
+left and enlarged directional hold-to-move controls on the right. Releasing a
+direction, moving outside its button, or losing window focus requests a stop.
+A directional press cancels the current click motion and waits for
+acknowledgement before moving; canceled motions do not resume. The robot-side
+motion node remains the sole publisher to its configured `twist_mux` input. A
+short manual-command lease stops refreshing motion if the viewer or
+communication stops. Joystick priority and the deployed watchdog behavior are
+unchanged.
 
-The shared speed slider selects 0.2–2.5 m/s by default, but the viewer clamps
-commands to 0.20 m/s and 0.35 rad/s by default. The `SPEED` line shows selected
-and viewer-capped linear speeds, respectively; the robot may clamp them further.
+Viewer movement requests use one-use permits issued by the robot and expiring
+on its monotonic clock. Before its first motion, a new viewer waits for a
+stop acknowledgement; STOP and manual release invalidate outstanding
+permits. This avoids requiring synchronized laptop and robot wall clocks while
+rejecting replayed, reordered and expired authorized movement requests. A stop request
+is not a hardware emergency stop and cannot be guaranteed to arrive over a
+failed network; directional movement also has a robot-side lease.
+
+The matching `obot_msgs` service definitions must be built on both machines
+before updating either endpoint; old and new `/click_drive` interfaces are not
+compatible. Preserve the normal ROS network settings and use the clean laptop
+build procedure below.
+
+The shared SLOW, MEDIUM and FAST buttons select the configurable
+`speed.slow_mps` (0.20), `speed.medium_mps` (0.50) and `speed.fast_mps`
+(1.00) values. The viewer clamps commands to 0.20 m/s and 0.35 rad/s by
+default; the robot may clamp them further. The speed line displays the
+viewer-capped linear speed.
 Rotation is calculated from wheel
 separation as `2 * linear_speed / wheel_separation` and capped in rad/s.
 Viewer parameters `directional.min_speed_mps` (0.2),
-`directional.max_speed_mps` (2.5), `directional.default_speed_mps` (0.2),
+`directional.max_speed_mps` (2.5), `directional.default_speed_mps` (0.2,
+retained for compatibility; initial selection is SLOW),
 `directional.linear_limit_mps` (0.2), `directional.angular_limit_rps` (0.35),
 and `directional.wheel_separation_m` (0.486) configure these values. The robot
 node independently enforces `max_viewer_linear_speed` (0.2) and
@@ -94,7 +111,7 @@ the viewer with `--ros-args -p click.enable_motion:=true` (alongside any
 desired speed parameters).
 
 On `ros-24`, both the repository and `~/bin/obot-view2cams` launchers enable
-click-to-drive, set the viewer's linear limit and slider maximum to 1.0 m/s,
+click-to-drive, set the viewer's linear limit and speed selection maximum to 1.0 m/s,
 and set the center marker thickness to 4 pixels and height fraction to 0.4.
 After updating the repository launcher, install it with:
 
@@ -102,15 +119,29 @@ After updating the repository launcher, install it with:
 
 The Pi's separate `max_viewer_linear_speed` limit must also permit the
 requested speed. Selecting a target does not move the robot: select TURN to
-rotate, then enter a distance and select GO. CANCEL stops or cancels the
-operation. The directional diamond takes priority over click-to-drive.
+rotate, then use the always-visible GO button to request LiDAR-based travel to
+the configured standoff distance (`go.target_standoff_m`, default `1.0`).
+GO-2/GO-4/GO-6 fixed-distance buttons (in current operator units) are also
+available after TURN completes. CANCEL stops or cancels the operation. The
+directional diamond takes priority over click-to-drive.
+The selected camera feature is followed by a visual tracker; a lost track is
+explicitly marked and is not retained as a valid target. Tracking is an
+operator aid and does not apply automatic steering corrections.
+`operator.units` is `m` by default; set it to `ft` for displayed linear
+distance and velocity, fixed-distance GO buttons, telemetry, and remaining
+travel readouts. Internally commands remain SI.
+Press space while a viewer window has focus to request cancellation of viewer
+motion and all currently accepted spray goals, including a PS4 goal. A
+service-unavailable or cancellation failure is reported in the interface or
+viewer log; the stop request is not a hardware emergency stop.
 
-The front view's SPRAY panel uses square, circle and triangle icons for the
-corresponding server-configured timed sprays; the X icon cancels a spray
-started by this viewer. The displayed valve state is the robot's commanded
-state, not physical position feedback. Stale state shows UNKNOWN. The server
-accepts one spray at a time; it can reject a request while another client owns
-an active spray. The viewer cannot cancel a goal started by the PS4 client.
+The front view's SPRAY panel labels each mode with its server-configured
+duration and disables modes configured to `0.0` seconds. The STOP spray button
+cancels the current viewer spray request; the space-bar stop also requests
+cancellation of all accepted spray goals (including other clients). The
+displayed valve state is the robot's commanded state, not physical position
+feedback. Stale state shows UNKNOWN. The server accepts one spray at a time;
+it can reject a request while another client owns an active spray.
 Build the robot workspace's `obot_valve_interfaces` package before starting
 the viewer. The launcher sources only that package's environment hook, then
 the laptop workspace and its `obot_msgs` and `obot` hooks. If the interface is
@@ -126,16 +157,14 @@ Build section below. The launcher uses the laptop `local_setup.bash` to avoid
 following a stale generated underlay chain and explicitly prioritizes the
 laptop packages even when the calling shell already sourced the robot.
 
-These changes require matching rebuilt `obot_msgs` interfaces and the updated
-motion node on the robot and viewer on the laptop. The revised service is not
-wire-compatible with the previous `ClickDrive` service. Motion requests have a
+The robot-side motion node now uses measured odometry for DRIVE remaining
+distance, final-approach speed transition (`final_approach_distance_m`,
+`final_approach_speed_mps`), and DRIVE completion. Motion requests still use a
 short ROS-time deadline, so robot and laptop clocks must be synchronized; late
-requests are rejected. The revised interface and motion node were deployed to
-pi-bot-2. On 2026-11-23, live operational testing on OBot-2 confirmed that
-the viewer's valve controls, directional diamond, speed slider, TURN, CANCEL
-and GO worked, and motion used the selected slider speed. This is the
-operator's reported result for that test, not a certification of all operating
-conditions.
+requests are rejected. On 2026-11-23, live operational testing on OBot-2
+confirmed that valve controls, directional diamond, TURN/CANCEL/GO, and speed
+selection worked as expected. This is the operator's reported result for that
+test, not a certification of all operating conditions.
 
 ### Filtered LiDAR scan
 
@@ -186,43 +215,33 @@ and loop closures require a separate manual driving test.
 
 ### LiDAR operator overlay
 
-The front view displays a compact `FRONT`, `LEFT`, `RIGHT` panel in feet.
-`FRONT` is the median forward centerline distance; the sides are the nearest
-returns in the left and right thirds of the forward corridor, in robot
-coordinates. Distances are forward from the configured bumper plane, not from
-the LiDAR. Green means over 5 ft, yellow at most 5 ft, and red less than 2 ft,
-subject to hysteresis. A `NEAR` line appears if a closer central corridor return
-would otherwise be hidden by the centerline median. No obstacle positions are
-projected onto the fisheye image; the manual steering markers are unchanged.
+The front-camera image retains the centerline clearance and center-distance
+labels. It no longer shows separate left/right distance readouts. Nearby
+returns in the robot-width forward corridor are grouped into localized colored
+blots and projected horizontally by bearing through the available fisheye
+calibration. Multiple groups can be shown at once; red takes precedence at or
+below the danger threshold, and yellow marks returns within the warning
+threshold. The defaults are 1.0 m (red) and 2.0 m (yellow). The center distance
+is measured forward from the configured bumper plane, not from the LiDAR.
 
-The previous zero-distance warning could be produced by returns behind the
-bumper plane: negative clearances were clamped to zero. A live scan contained
-such returns in the center corridor, possibly from the robot itself. Returns
-behind that plane are now excluded rather than clamped; returns at or in front
-of the plane remain eligible, including very close obstacles. This exclusion
-can also hide a real obstacle behind the bumper plane, so it is not a
-substitute for identifying the robot's actual self-occlusion.
+The scanner points are transformed into `base_link` at the scan timestamp.
+Returns behind the bumper plane are excluded rather than clamped to zero; this
+avoids self-returns appearing as zero clearance, but may also hide a real
+obstacle behind that plane. The default bumper reference is 0.30572 m forward
+of `base_link` (0.260 m LiDAR position plus 0.04572 m to the leading edge).
+Set `lidar.front_bumper_x_m` to match the actual mounting if it changes.
 
-Approaching distances update immediately; receding distances are smoothed
-(25% per valid scan). Warning severity increases immediately and relaxes with a
-0.1 m margin. Brief missing returns may retain the last distance for at most
-0.25 seconds, marked with `~`; after that they show `--`. Stale scans never
-retain a displayed distance. The selected turn is shown as a compact `TURN`
-indicator at the upper left.
+These indicators are visual aids only: they do not steer, avoid obstacles,
+brake, or control the watchdog. Absence of a blot is not evidence that the path
+is clear. Stale scans and unavailable transforms suppress obstacle blots and
+are reported; the optional `LIDAR COVERAGE UNKNOWN` label flags a missing
+10-degree bin in the forward half-plane, which is only a coarse coverage
+indication. Sensor blind spots, reflective surfaces, field of view, and
+obstacles outside the scan plane can prevent detection. Verify the mounting,
+bumper reference, indicator bearings and threshold colors with known stationary
+objects before relying on the display.
 
-The overlay is a visual aid, **not** collision avoidance or an emergency stop:
-it does not control motion or the watchdog. A missing warning does not mean
-the way is clear. `--` means there is no usable return for that region.
-`LIDAR COVERAGE UNKNOWN` means at least one 10-degree bin in the forward
-180-degree half-plane has no valid range return. This is a coarse indication,
-not proof that the sensor has failed: invalid or infinite ranges may occur
-normally. Rear returns are not required. Even when the indication is absent,
-one valid return per bin does not establish that the corridor is clear.
-Stale scans and unavailable transforms are explicitly indicated.
-The scanner's blind spots, reflective surfaces, field of view, and obstacles
-outside its scan plane can prevent detection.
-
-Startup ROS parameters and defaults:
+Relevant startup ROS parameters and defaults:
 
 | Parameter | Default |
 |---|---:|
@@ -231,20 +250,14 @@ Startup ROS parameters and defaults:
 | `lidar.center_half_angle_deg` | `2.0` |
 | `lidar.robot_width_m` | `0.5334` |
 | `lidar.safety_margin_m` | `0.0762` per side |
-| `lidar.warning_distance_m` | `1.524` |
-| `lidar.danger_distance_m` | `0.6096` |
+| `lidar.warning_distance_m` | `2.0` |
+| `lidar.danger_distance_m` | `1.0` |
 | `lidar.stale_timeout_s` | `0.5` |
 | `lidar.front_bumper_x_m` | `0.30572` |
 
-The bumper default is 0.260 m for the LiDAR's X position plus 0.04572 m
-(1.8 inches) from the LiDAR rotational center to the bumper leading edge.
-Set `lidar.front_bumper_x_m` to match the actual mounting if it changes. The
-viewer requires the scan frame's TF to `base_link` at the scan timestamp and
-synchronized ROS clocks on the robot and laptop. Confirm the scanner mounting
-yaw, bumper reference, centerline distance, and left/right warnings with known
-stationary objects before using the overlay; also verify stale and TF-error
-indications with the robot stationary. Disable it with
-`--ros-args -p lidar.enabled:=false` if needed.
+The viewer requires the scan-frame transform to `base_link` at each scan's
+timestamp and synchronized ROS clocks on the robot and laptop. Disable the
+display with `--ros-args -p lidar.enabled:=false` if needed.
 
 ## Odometry path in RViz
 

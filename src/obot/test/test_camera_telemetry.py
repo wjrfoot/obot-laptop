@@ -1,19 +1,18 @@
 import math
 import threading
 from types import SimpleNamespace
-
-import numpy as np
-import pytest
-import cv2
-import rclpy
 from unittest.mock import Mock
-from geometry_msgs.msg import TransformStamped
-from sensor_msgs.msg import CompressedImage
 
+import cv2
+from geometry_msgs.msg import TransformStamped
+import numpy as np
+from obot import dual_compressed_viewer
 from obot.camera_dashboard import render_dashboard
 from obot.camera_telemetry import Telemetry, wheel_speeds, yaw_from_quaternion
 from obot.dual_compressed_viewer import DualCompressedViewer
-from obot import dual_compressed_viewer
+import pytest
+import rclpy
+from sensor_msgs.msg import CompressedImage
 
 
 def test_wheels_use_names_and_reverse_only_left_sign():
@@ -97,7 +96,10 @@ def test_ros_callbacks_extract_motion_and_voltage():
         linear=SimpleNamespace(x=-0.4), angular=SimpleNamespace(z=0.2)))
     DualCompressedViewer._on_command(viewer, msg)
     odom = SimpleNamespace(twist=SimpleNamespace(twist=SimpleNamespace(
-        linear=SimpleNamespace(x=0.3), angular=SimpleNamespace(z=-0.7))))
+        linear=SimpleNamespace(x=0.3), angular=SimpleNamespace(z=-0.7))),
+        pose=SimpleNamespace(pose=SimpleNamespace(
+            position=SimpleNamespace(x=1.5, y=-2.0),
+            orientation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0))))
     DualCompressedViewer._on_odom(viewer, odom)
     DualCompressedViewer._on_voltage(viewer, 'left', SimpleNamespace(data=18.6))
     DualCompressedViewer._on_voltage(viewer, 'right', SimpleNamespace(data=float('nan')))
@@ -105,6 +107,7 @@ def test_ros_callbacks_extract_motion_and_voltage():
     data = state.snapshot()
     assert data['command'] == (-0.4, 0.2)
     assert data['actual'] == (0.3, -0.7)
+    assert viewer._latest_odom_pose == pytest.approx((1.5, -2.0, 0.0))
     assert data['voltage_left'] == 18.6
     assert data['voltage_right'] is None
     assert data['health'] == 'RECOVERING'
@@ -122,17 +125,19 @@ def test_dashboard_renders_status_and_controls(status):
 @pytest.mark.parametrize(('width', 'height'), [
     (160, 120), (240, 180), (320, 240), (480, 360), (800, 600)])
 def test_reset_button_does_not_cover_wheel_speed_row(width, height):
-    wheel_text = 'WHEEL RPM  L +23.4  R +22.7'
-    scale = min(1.1, max(0.30, 0.30 * min(width / 160, height / 120)))
-    row = max(11, min(48, height // 11))
+    panel, hits = render_dashboard(width, height, {
+        'wheels': {'left': 23.4, 'right': 22.7}})
+    if width < 200 or height < 160:
+        assert not hits
+        return
+    scale = min(1.5, max(0.55, 0.55 * min(width / 220, height / 180)))
+    row = max(18, min(62, height // 9))
     margin = max(3, width // 50)
     thickness = max(1, round(scale * 1.5))
     expected = np.full((height, width, 3), 35, dtype=np.uint8)
-    cv2.putText(expected, wheel_text, (margin, 4 * row),
+    cv2.putText(expected, 'WHEEL RPM  L +23.4  R +22.7', (margin, 4 * row),
                 cv2.FONT_HERSHEY_SIMPLEX, scale, (225, 225, 225),
                 thickness, cv2.LINE_AA)
-    panel, hits = render_dashboard(width, height, {
-        'wheels': {'left': 23.4, 'right': 22.7}})
     wheel_pixels = np.any(expected != 35, axis=2)
     assert np.array_equal(panel[wheel_pixels], expected[wheel_pixels])
     assert hits['reset'][1] > np.nonzero(wheel_pixels)[0].max()
@@ -142,7 +147,8 @@ def test_reset_button_does_not_cover_wheel_speed_row(width, height):
 @pytest.mark.parametrize(('width', 'height'), [
     (160, 120), (240, 180), (320, 240), (480, 360), (800, 600)])
 @pytest.mark.parametrize('source', ['odom', 'map'])
-def test_reset_text_is_aligned_with_selector(width, height, source, monkeypatch):
+def test_reset_button_is_bottom_aligned_and_separate_from_selector(
+        width, height, source, monkeypatch):
     original = cv2.putText
     drawn = {}
 
@@ -154,15 +160,18 @@ def test_reset_text_is_aligned_with_selector(width, height, source, monkeypatch)
 
     monkeypatch.setattr(cv2, 'putText', record)
     _, hits = render_dashboard(width, height, {'source': source})
+    if width < 200 or height < 160:
+        assert not hits
+        return
     (source_x, source_y), (source_w, source_h) = drawn[f'[{source.upper()} v]']
     (button_x, button_y), (button_w, button_h) = drawn['RESET ORIGIN']
-    assert abs((source_y - source_h / 2) - (button_y - button_h / 2)) <= 1
     assert hits['reset'][0] - hits['source'][2] == 10
     assert source_x + source_w <= hits['source'][2]
     assert hits['reset'][0] <= button_x
     assert button_x + button_w < hits['reset'][2]
     assert hits['reset'][1] <= button_y - button_h
     assert button_y < hits['reset'][3]
+    assert hits['reset'][1] > hits['source'][3]
 
 
 @pytest.mark.parametrize(('width', 'height'), [
@@ -179,6 +188,9 @@ def test_clear_button_fits_and_does_not_cover_other_rows(width, height, monkeypa
     monkeypatch.setattr(cv2, 'putText', record)
     _, hits = render_dashboard(width, height, {
         'health': 'NORMAL', 'notice': 'Path cleared'})
+    if width < 200 or height < 160:
+        assert not hits
+        return
     reset, clear = hits['reset'], hits['clear']
     assert 0 <= reset[0] < reset[2] < clear[0] < clear[2] <= width
     assert reset[1] == clear[1] and reset[3] == clear[3]
@@ -189,7 +201,7 @@ def test_clear_button_fits_and_does_not_cover_other_rows(width, height, monkeypa
         if text not in drawn:
             continue
         (_, baseline), (_, text_height) = drawn[text]
-        assert baseline - text_height > clear[3]
+        assert baseline - text_height < clear[1]
     assert 'Path cleared' in drawn
     if 'WATCHDOG  Motors OK' in drawn:
         watch_y = drawn['WATCHDOG  Motors OK'][0][1]

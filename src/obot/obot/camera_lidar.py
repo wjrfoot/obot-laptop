@@ -40,6 +40,14 @@ class Hazard:
 
 
 @dataclass(frozen=True)
+class ObstacleBlob:
+    bearing_rad: float
+    nearest_m: float
+    severity: str
+    span_rad: float
+
+
+@dataclass(frozen=True)
 class LidarReading:
     center_m: float | None
     left_m: float | None
@@ -146,6 +154,45 @@ def corridor_hazards(points, config):
     )
 
 
+def corridor_obstacle_blobs(points, config, warning_distance_m, danger_distance_m):
+    """Group nearby forward-corridor returns into display-friendly blobs."""
+    if (not math.isfinite(warning_distance_m) or not math.isfinite(danger_distance_m)
+            or warning_distance_m <= 0 or danger_distance_m <= 0
+            or danger_distance_m > warning_distance_m):
+        raise ValueError('Invalid obstacle thresholds')
+    half_width = config.robot_width_m / 2 + config.safety_margin_m
+    samples = []
+    for x, y in points:
+        if x < config.front_bumper_x_m or x <= 0 or abs(y) > half_width:
+            continue
+        distance = x - config.front_bumper_x_m
+        if distance > warning_distance_m:
+            continue
+        samples.append((math.atan2(y, x), distance))
+    if not samples:
+        return ()
+    samples.sort(key=lambda item: item[0])
+    groups = [[samples[0]]]
+    for bearing, distance in samples[1:]:
+        previous_bearing, previous_distance = groups[-1][-1]
+        if (abs(bearing - previous_bearing) <= math.radians(3.5)
+                and abs(distance - previous_distance) <= 0.5):
+            groups[-1].append((bearing, distance))
+        else:
+            groups.append([(bearing, distance)])
+    blobs = []
+    for group in groups:
+        bearings = [value[0] for value in group]
+        nearest = min(value[1] for value in group)
+        severity = 'red' if nearest <= danger_distance_m else 'yellow'
+        blobs.append(ObstacleBlob(
+            bearing_rad=sum(bearings) / len(bearings),
+            nearest_m=nearest,
+            severity=severity,
+            span_rad=max(bearings) - min(bearings)))
+    return tuple(blobs)
+
+
 def process_scan(scan, transform, config):
     points, coverage_uncertain = scan_points(scan, transform)
     regions = corridor_distances(points, config)
@@ -166,7 +213,8 @@ class _DistanceFilter:
         self.present = distance is not None
         if distance is None:
             return
-        if self.last_valid is None or stamp - self.last_valid > min(0.25, self.config.stale_timeout_s):
+        if (self.last_valid is None
+                or stamp - self.last_valid > min(0.25, self.config.stale_timeout_s)):
             self.value = distance
             self.severity = None
         else:
@@ -176,7 +224,8 @@ class _DistanceFilter:
         severity = 'red' if distance < danger else 'yellow' if distance <= warning else 'green'
         if self.severity == 'red' and self.value < danger + 0.1:
             severity = 'red'
-        elif self.severity in ('red', 'yellow') and severity == 'green' and self.value <= warning + 0.1:
+        elif (self.severity in ('red', 'yellow') and severity == 'green'
+              and self.value <= warning + 0.1):
             severity = 'yellow'
         self.severity = severity
 
