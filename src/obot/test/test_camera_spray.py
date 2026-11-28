@@ -204,22 +204,22 @@ def test_late_old_callbacks_do_not_change_next_goal(spray):
 
 
 def test_panel_hitboxes_and_small_images():
-    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    image = np.zeros((720, 640, 3), dtype=np.uint8)
     snapshot = SpraySnapshot('CLOSED', False, None, '', {
         'circle': 4.0, 'square': 2.0, 'triangle': 0.0})
-    panel, hits = draw_spray_panel(image, 640, 480, snapshot)
+    panel, hits = draw_spray_panel(image, (426, 480, 640, 720), snapshot)
     assert set(hits) == {'square', 'circle', 'triangle', 'cancel'}
     assert image[panel[1]:panel[3], panel[0]:panel[2]].any()
-    assert draw_spray_panel(image[:200, :280], 280, 200, snapshot) == (None, {})
+    assert draw_spray_panel(image, (0, 0, 80, 100), snapshot) == (None, {})
 
 
 @pytest.mark.parametrize(('name', 'mode'), [
     ('square', 1), ('circle', 0), ('triangle', 2), ('cancel', None)])
 def test_mouse_clicks_call_only_spray_controls(name, mode):
-    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    image = np.zeros((720, 640, 3), dtype=np.uint8)
     snapshot = SpraySnapshot('CLOSED', False, None, '', {
         'circle': 4.0, 'square': 2.0, 'triangle': 0.0})
-    panel, hits = draw_spray_panel(image, 640, 480, snapshot)
+    panel, hits = draw_spray_panel(image, (426, 480, 640, 720), snapshot)
     viewer = SimpleNamespace(_spray_panel=panel, _spray_hits=hits,
                              _spray_down=None, spray=Mock())
     x, y = hits[name][:2]
@@ -236,10 +236,10 @@ def test_mouse_clicks_call_only_spray_controls(name, mode):
 
 
 def test_release_without_press_or_outside_button_never_sprays():
-    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    image = np.zeros((720, 640, 3), dtype=np.uint8)
     snapshot = SpraySnapshot('CLOSED', False, None, '', {
         'circle': 4.0, 'square': 2.0, 'triangle': 0.0})
-    panel, hits = draw_spray_panel(image, 640, 480, snapshot)
+    panel, hits = draw_spray_panel(image, (426, 480, 640, 720), snapshot)
     viewer = SimpleNamespace(_spray_panel=panel, _spray_hits=hits,
                              _spray_down=None, spray=Mock())
     x, y = hits['square'][:2]
@@ -283,15 +283,16 @@ def test_spray_duration_query_rejects_non_numeric_and_reports_error(spray):
 
 @pytest.mark.parametrize('handler', ['_on_mouse', '_on_front_mouse'])
 def test_spray_click_does_not_select_camera_target(handler):
-    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    image = np.zeros((720, 640, 3), dtype=np.uint8)
     snapshot = SpraySnapshot('CLOSED', False, None, '', {
         'circle': 4.0, 'square': 2.0, 'triangle': 0.0})
-    panel, hits = draw_spray_panel(image, 640, 480, snapshot)
+    panel, hits = draw_spray_panel(image, (426, 480, 640, 720), snapshot)
     spray = Mock()
     spray.mode_enabled.side_effect = lambda name: name != 'triangle'
     viewer = SimpleNamespace(
         _spray_panel=panel, _spray_hits=hits, _spray_down=None, spray=spray,
         _handle_motion_mouse=Mock(return_value=False),
+        _track_click_press=Mock(),
         _click_handle_button=Mock(), _select_front_target=Mock(),
         _on_dashboard_mouse=Mock(), front_display_size=(640, 480),
         _directional_hits={})
@@ -377,8 +378,8 @@ def test_real_action_handoff_with_isolated_mock_server_and_global_cancel():
         rclpy.shutdown()
 
 
-def test_panel_draws_duration_labels_and_disable_state():
-    image = np.zeros((480, 640, 3), dtype=np.uint8)
+def test_panel_draws_duration_labels_and_disable_state(monkeypatch):
+    image = np.zeros((720, 640, 3), dtype=np.uint8)
     snapshot = SpraySnapshot(
         state='CLOSED',
         active=False,
@@ -386,10 +387,23 @@ def test_panel_draws_duration_labels_and_disable_state():
         message='',
         durations={'circle': 4.0, 'square': 2.0, 'triangle': 0.0},
     )
-    panel, hits = draw_spray_panel(image, 640, 480, snapshot)
+    labels = []
+    original = cv2.putText
+
+    def record(image, text, *args):
+        labels.append(text)
+        return original(image, text, *args)
+
+    monkeypatch.setattr(cv2, 'putText', record)
+    panel, hits = draw_spray_panel(image, (426, 480, 640, 720), snapshot)
     assert panel is not None
     assert set(hits) == {'square', 'circle', 'triangle', 'cancel'}
     assert image[panel[1]:panel[3], panel[0]:panel[2]].any()
+    assert {'SPRAY CLOSED', '2.0s', '4.0s', '0.0s', 'STOP'} <= set(labels)
+    disabled = hits['triangle']
+    enabled = hits['square']
+    assert tuple(image[disabled[1] + 4, disabled[0] + 4]) == (80, 80, 80)
+    assert tuple(image[enabled[1] + 4, enabled[0] + 4]) != (80, 80, 80)
 
 
 def test_mouse_clicks_ignore_disabled_mode_and_allow_enabled():

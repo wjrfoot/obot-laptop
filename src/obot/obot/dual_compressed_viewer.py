@@ -24,6 +24,7 @@ from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 
+from .camera_controls import fit_text, push_button as _push_button
 from .camera_dashboard import render_dashboard
 from .camera_lidar import (
     center_distance, corridor_distances, corridor_obstacle_blobs, LidarConfig,
@@ -96,6 +97,8 @@ SPEED_PRESET_DEFAULTS = {
 
 GO_DEFAULTS = {
     'go.target_standoff_m': 1.0,
+    'obstacle.min_diameter_fraction': 0.015,
+    'obstacle.max_diameter_fraction': 0.05,
 }
 
 MOTION_DEFAULTS = {
@@ -327,34 +330,6 @@ class TargetTrackingWorker:
                 self._state = state
 
 
-def _push_button(canvas, box, label, *, enabled=True, primary=False, active=False):
-    x0, y0, x1, y1 = box
-    if not enabled:
-        fill, edge, ink = (80, 80, 80), (120, 120, 120), (150, 150, 150)
-    elif active:
-        fill, edge, ink = (30, 150, 30), (230, 230, 230), (255, 255, 255)
-    elif primary:
-        fill, edge, ink = (35, 140, 35), (235, 235, 235), (255, 255, 255)
-    else:
-        fill, edge, ink = (60, 60, 60), (225, 225, 225), (240, 240, 240)
-    cv2.rectangle(canvas, (x0, y0), (x1, y1), fill, -1)
-    cv2.rectangle(canvas, (x0, y0), (x1, y1), edge, 2)
-    scale = 0.8
-    thickness = 2
-    while scale > 0.35:
-        (width, height), _ = cv2.getTextSize(
-            label, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
-        if width <= max(1, x1 - x0 - 8) and height <= max(1, y1 - y0 - 6):
-            break
-        scale *= 0.9
-    _, baseline = cv2.getTextSize(
-        label, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
-    tx = x0 + max(3, ((x1 - x0) - width) // 2)
-    ty = y0 + max(height + 2, ((y1 - y0) + height) // 2 - baseline)
-    cv2.putText(canvas, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX,
-                scale, ink, thickness, cv2.LINE_AA)
-
-
 def _tracker_factory():
     if hasattr(cv2, 'TrackerCSRT_create'):
         return cv2.TrackerCSRT_create
@@ -402,9 +377,6 @@ def lidar_labels(snapshot, units='m'):
               'green': (70, 220, 70), None: (180, 180, 180)}
     value = reading.front
     labels = []
-    text = '--' if value.distance_m is None else (
-        f'{"~" if value.held else ""}{display_linear(value.distance_m, units):.1f} {units}')
-    labels.append((f'CENTER: {text}', colors[value.severity]))
     near = reading.center_nearest
     front = value
     rank = {None: 0, 'green': 1, 'yellow': 2, 'red': 3}
@@ -439,6 +411,8 @@ def draw_lidar(img, snapshot, top=4, units='m'):
     if width < 100 or height < 60:
         return
     labels = lidar_labels(snapshot, units)
+    if not labels:
+        return
     available = max(1, height // 3 - top)
     scale = min(0.6, max(0.25, width / 1000), max(0.25, available / (25 * len(labels))))
     thickness = 1 if scale < 0.5 else 2
@@ -651,6 +625,14 @@ class DualCompressedViewer(Node):
             self.get_parameter('go.target_standoff_m').value)
         if not math.isfinite(self.target_standoff_m) or self.target_standoff_m < 0:
             raise ValueError('go.target_standoff_m must be finite and nonnegative')
+        self.obstacle_min_fraction = float(
+            self.get_parameter('obstacle.min_diameter_fraction').value)
+        self.obstacle_max_fraction = float(
+            self.get_parameter('obstacle.max_diameter_fraction').value)
+        if not (math.isfinite(self.obstacle_min_fraction)
+                and math.isfinite(self.obstacle_max_fraction)
+                and 0 < self.obstacle_min_fraction <= self.obstacle_max_fraction <= 0.05):
+            raise ValueError('Obstacle diameter fractions must satisfy 0 < min <= max <= 0.05')
         for name, default in MOTION_DEFAULTS.items():
             self.declare_parameter(name, default)
         self.final_approach_distance_m = float(
@@ -728,6 +710,8 @@ class DualCompressedViewer(Node):
         self.click_message = ''
         self._go_requested_distance_m = None
         self._go_start_pose = None
+        self._pending_go = None
+        self._pressed_click = None
         self._latest_odom_pose = None
         self._latest_odom_time = 0.0
         self._latest_scan_time = 0.0
@@ -763,6 +747,8 @@ class DualCompressedViewer(Node):
             d['min_speed_mps'], self.speed_presets['SLOW']))
         self._viewer_id = uuid.uuid4().hex
         self._viewer_sequence = 0
+        self._motion_result_id = None
+        self._active_go = None
         self._motion_session_ready = False
         self._manual_client = self.create_client(ClickDrive, '/click_drive')
         self._manual_button = None
@@ -792,6 +778,7 @@ class DualCompressedViewer(Node):
                 'containing obot_valve_interfaces before starting the viewer')
         self.front_display_size = None
         self.front_native_size = None
+        self._control_bottom = 0
 
         # Latest decoded camera images.
         self.last_left = None
@@ -1092,8 +1079,7 @@ class DualCompressedViewer(Node):
         return max(0.0, self._go_requested_distance_m - progress)
 
     def _go_button_text(self):
-        distance = (self._go_remaining_m() if self.click_state == 'driving'
-                    else self._go_distance_from_lidar())
+        distance = self._go_distance_from_lidar()
         if distance is None:
             return 'GO --'
         return f'GO {display_linear(distance, self.operator_units):.1f} {self.operator_units}'
@@ -1147,11 +1133,22 @@ class DualCompressedViewer(Node):
             x = self._bearing_to_pixel(math.degrees(blob.bearing_rad))
             if x is None:
                 continue
-            radius = max(9, min(24, int(7 + blob.span_rad * 220)))
-            y = 55
+            width = image.shape[1]
+            fraction = max(0.0, min(1.0, 1.0 - blob.nearest_m /
+                                    self.lidar_config.warning_distance_m))
+            diameter = width * (self.obstacle_min_fraction + fraction * (
+                self.obstacle_max_fraction - self.obstacle_min_fraction))
+            radius = max(1, int((diameter - 2) / 2))
+            y = max(radius + 3, 55)
             color = (0, 0, 255) if blob.severity == 'red' else (0, 255, 255)
-            cv2.circle(image, (x, y), radius, color, -1)
-            cv2.circle(image, (x, y), radius, (40, 40, 40), 2)
+            cv2.circle(image, (x, y), radius, color, 2)
+            distance = display_linear(blob.nearest_m, self.operator_units)
+            label = f'{distance:.1f} {self.operator_units}'
+            size, baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+            lx = min(max(0, x + radius + 4), max(0, width - size[0] - 1))
+            ly = min(image.shape[0] - baseline - 1, y + size[1] // 2)
+            cv2.putText(image, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.45, color, 1, cv2.LINE_AA)
 
     def _click_request(self, command, angle=0.0, distance=0.0):
         """Nonblocking ROS service call; results processed in draw()."""
@@ -1165,6 +1162,7 @@ class DualCompressedViewer(Node):
         request.distance_m = float(distance)
         if command in ('TURN', 'DRIVE'):
             self._click_future = MovementRequest(self, self._click_client, request)
+            self._motion_result_id = f'{request.client_id}:{request.sequence}'
         else:
             self._click_future = self._click_client.call_async(request)
         self._click_request_kind = command
@@ -1214,6 +1212,7 @@ class DualCompressedViewer(Node):
 
     def _manual_press(self, name):
         self._manual_stop()
+        self._pending_go = None
         self._click_future = None
         self._click_request_kind = None
         self._clear_selected_target()
@@ -1248,6 +1247,7 @@ class DualCompressedViewer(Node):
                     self._manual_stop()
                     return
                 if not response.accepted:
+                    self._pending_go = None
                     self.click_message = f'Manual rejected: {response.message}'
                     self._manual_stop()
                     return
@@ -1273,16 +1273,23 @@ class DualCompressedViewer(Node):
         if not self.click_enable_motion:
             self.click_message = 'CLICK MOTION DISABLED'
             return
-        if self.selected_target.status == 'lost':
-            self.click_message = 'Target tracking lost'
+        if self.selected_target.status not in ('selected', 'tracking'):
+            self.click_message = 'Target unavailable or tracking lost'
+            return
+        if abs(self.selected_target.bearing_deg) < 0.1:
+            self._clear_selected_target()
+            self.click_state = 'ready'
+            self.click_message = 'Turn complete'
             return
         if self._click_request('TURN', self.selected_target.bearing_deg):
+            self._pending_go = None
             self.click_state = 'turning'
             self._click_turn_started = time.monotonic()
             self._click_saw_turn_motion = False
             self.click_message = 'TURN requested...'
 
     def _click_cancel(self):
+        self._pending_go = None
         if self.click_state == 'selected':
             self._clear_selected_target()
             self.click_state = 'idle'
@@ -1297,6 +1304,7 @@ class DualCompressedViewer(Node):
     def _universal_stop(self):
         """Request motion and spray cancellation without waiting for the GUI."""
         self._manual_stop()
+        self._pending_go = None
         self._clear_selected_target()
         self._click_future = None
         self._click_request_kind = None
@@ -1311,13 +1319,10 @@ class DualCompressedViewer(Node):
     def _request_drive(self, distance):
         if self._manual_button is not None:
             return
-        if self.click_state != 'ready' or self._click_future is not None:
+        if self.click_state not in ('idle', 'selected', 'ready') or self._click_future is not None:
             return
-        if not math.isfinite(distance) or not 0.1 <= distance <= 6.0:
-            self.click_message = (
-                f'Distance must be {display_linear(0.1, self.operator_units):.2f}'
-                f' to {display_linear(6.0, self.operator_units):.2f}'
-                f' {self.operator_units}')
+        if not math.isfinite(distance) or distance < 0.1:
+            self.click_message = 'Distance must be finite and at least 0.1 m'
             return
         if not self.click_enable_motion:
             self.click_message = 'CLICK MOTION DISABLED'
@@ -1331,12 +1336,41 @@ class DualCompressedViewer(Node):
                 f'DRIVE {display_linear(distance, self.operator_units):.2f}'
                 f' {self.operator_units} requested...')
 
-    def _click_go(self):
-        distance = self._go_distance_from_lidar()
-        if distance is None:
-            self.click_message = 'GO unavailable: center LiDAR invalid'
+    def _begin_go(self, distance):
+        if (self._manual_button is not None
+                or self.click_state not in ('idle', 'selected', 'ready')):
             return
+        if not self.click_enable_motion:
+            self.click_message = 'CLICK MOTION DISABLED'
+            return
+        target = self.selected_target
+        if self.click_state == 'selected' and target.status not in ('selected', 'tracking'):
+            self.click_message = 'Target unavailable or tracking lost'
+            return
+        if self.click_state == 'selected' and abs(target.bearing_deg) >= 0.1:
+            self._pending_go = ('lidar', None) if distance is None else ('fixed', distance)
+            if self._click_request('TURN', target.bearing_deg):
+                self.click_state = 'turning'
+                self._click_saw_turn_motion = False
+                self.click_message = 'Turning before drive'
+            else:
+                self._pending_go = None
+            return
+        self._start_go_drive(distance)
+
+    def _start_go_drive(self, distance):
+        if distance is None:
+            distance = self._go_distance_from_lidar()
+            if distance is None:
+                self.click_message = 'GO unavailable: center LiDAR invalid or stale'
+                return
         self._request_drive(distance)
+
+    def _click_go(self):
+        was_ready = self.click_state in ('idle', 'selected', 'ready')
+        self._begin_go(None)
+        if was_ready and self.click_state in ('turning', 'driving'):
+            self._active_go = 'GO'
 
     def _click_go_fixed(self, distance_units):
         try:
@@ -1344,7 +1378,10 @@ class DualCompressedViewer(Node):
         except ValueError:
             self.click_message = 'Invalid fixed distance'
             return
-        self._request_drive(distance)
+        was_ready = self.click_state in ('idle', 'selected', 'ready')
+        self._begin_go(distance)
+        if was_ready and self.click_state in ('turning', 'driving'):
+            self._active_go = str(int(distance_units))
 
     def _click_poll(self):
         """Poll the GUI-thread request without blocking camera drawing."""
@@ -1356,6 +1393,8 @@ class DualCompressedViewer(Node):
             try:
                 response = future.result()
                 if not response.accepted:
+                    if kind == 'TURN':
+                        self._pending_go = None
                     self.click_message = f'{kind} rejected: {response.message}'
                     if kind == 'TURN' and self.click_state == 'turning':
                         self.click_state = 'selected'
@@ -1363,6 +1402,10 @@ class DualCompressedViewer(Node):
                         self.click_state = 'ready'
                 elif kind in ('TURN', 'DRIVE'):
                     self.click_message = response.message
+                    if kind == 'TURN':
+                        self._click_saw_turn_motion = True
+                    else:
+                        self._click_saw_drive_motion = True
                 elif kind == 'STOP':
                     self.click_message = 'STOP accepted'
                     self.click_state = 'idle'
@@ -1370,8 +1413,6 @@ class DualCompressedViewer(Node):
                     self._go_requested_distance_m = None
                     self._go_start_pose = None
                 elif kind == 'STATUS' and self.click_state in ('turning', 'driving'):
-                    # Do not mistake the brief idle interval after enqueue for
-                    # completion. Require observing non-idle first.
                     if response.state != 'idle':
                         if self.click_state == 'turning':
                             self._click_saw_turn_motion = True
@@ -1379,14 +1420,25 @@ class DualCompressedViewer(Node):
                             self._click_saw_drive_motion = True
                     elif self.click_state == 'turning' and self._click_saw_turn_motion:
                         self.click_state = 'ready'
-                        self.click_message = 'Turn complete; enter distance, then GO'
+                        pending, self._pending_go = self._pending_go, None
+                        expected = f'result=success, request={self._motion_result_id},'
+                        if not response.message.startswith(expected):
+                            self.click_message = 'Turn failed or completion unconfirmed'
+                        else:
+                            self._clear_selected_target()
+                            self.click_message = 'Turn complete'
+                            if pending is not None:
+                                self._start_go_drive(pending[1])
                     elif self.click_state == 'driving' and self._click_saw_drive_motion:
                         self.click_state = 'idle'
                         self._clear_selected_target()
                         self._go_requested_distance_m = None
                         self._go_start_pose = None
-                        self.click_message = 'Drive complete (controller idle)'
+                        expected = f'result=success, request={self._motion_result_id},'
+                        self.click_message = ('Drive complete' if response.message.startswith(
+                            expected) else 'Drive failed or completion unconfirmed')
             except Exception as exc:
+                self._pending_go = None
                 self.click_message = f'{kind} service error: {exc}'
                 if kind in ('TURN', 'DRIVE') and self.click_state in ('turning', 'driving'):
                     self.click_state = 'stopping'
@@ -1398,77 +1450,113 @@ class DualCompressedViewer(Node):
                 self._click_last_status = time.monotonic()
 
     def _click_drive_buttons(self, canvas, front_w, front_h):
-        """Draw the enlarged motion panel and cache displayed hitboxes."""
+        """Draw motion controls in the first two panels below the camera."""
         self._click_button_hits = {}
         self._directional_hits = {}
         self._fixed_go_hits = {}
         w = min(front_w, canvas.shape[1])
-        h = min(front_h, canvas.shape[0])
-        if w < 520 or h < 280:
+        top = front_h
+        h = canvas.shape[0] - top
+        if w < 300 or h < 150:
             return
-        top = h - 240
-        mid = w // 2
-        cv2.rectangle(canvas, (0, top), (w - 1, h - 1), (30, 30, 30), -1)
-        cv2.line(canvas, (mid, top), (mid, h - 1), (130, 130, 130), 2)
-
-        def text(value, x, y, color=(235, 235, 235), scale=0.6):
-            cv2.putText(canvas, value, (x, y), cv2.FONT_HERSHEY_SIMPLEX,
-                        scale, color, 2 if scale >= 0.6 else 1, cv2.LINE_AA)
-
-        text('CLICK-TO-DRIVE', 10, top + 26, scale=0.75)
+        first, second = w // 3, 2 * w // 3
+        cv2.rectangle(canvas, (0, top), (w - 1, top + h - 1), (30, 30, 30), -1)
+        for x in (first, second):
+            cv2.line(canvas, (x, top), (x, top + h - 1), (130, 130, 130), 1)
+        margin = max(4, round(first * 0.025))
+        gap = max(3, margin // 2)
+        header = max(24, round(h * 0.14))
+        button_h = max(24, round(h * 0.16))
+        row_top = top + header
+        fit_text(canvas, 'CLICK-TO-DRIVE', (margin, top, first - margin, row_top))
         angle = '--'
         if self.selected_target.status != 'idle':
             angle = f'{self.selected_target.bearing_deg:+.0f} deg'
-        text('Turn: ' + angle, 10, top + 52, scale=0.58)
-        if self.selected_target.status == 'lost':
-            text('TRACK LOST', 10, top + 78, (0, 180, 255), 0.58)
-        left_w = mid - 14
-        row_top = top + 86
-        turn_box = (8, row_top, 8 + left_w // 2 - 4, row_top + 42)
-        cancel_box = (8 + left_w // 2 + 2, row_top, 8 + left_w, row_top + 42)
+        left, right = margin, first - margin
+        mid = (left + right) // 2
+        turn_box = (left, row_top, mid - gap, row_top + button_h)
+        stop_box = (mid, row_top, right, row_top + button_h)
         can_turn = (self.selected_target.status in ('selected', 'tracking')
                     and self.click_state == 'selected')
-        _push_button(canvas, turn_box, 'TURN', enabled=can_turn)
-        _push_button(canvas, cancel_box, 'CANCEL', enabled=self.click_state != 'idle')
+        _push_button(canvas, turn_box, 'TURN', enabled=can_turn or self.click_state == 'turning',
+                     active=self.click_state == 'turning', pressed=self._pressed_click == 'TURN')
+        _push_button(canvas, stop_box, 'STOP', enabled=self.click_state != 'idle',
+                     pressed=self._pressed_click == 'STOP')
         self._click_button_hits['TURN'] = turn_box
-        self._click_button_hits['CANCEL'] = cancel_box
-        go_enabled = self.click_state == 'ready' and self._go_distance_from_lidar() is not None
-        go_box = (8, row_top + 48, 8 + left_w, row_top + 98)
-        _push_button(canvas, go_box, self._go_button_text(), enabled=go_enabled, primary=True)
+        self._click_button_hits['STOP'] = stop_box
+        can_go = self.click_state in ('idle', 'selected', 'ready')
+        go_enabled = can_go and (self.click_state == 'selected'
+                                 or self._go_distance_from_lidar() is not None)
+        go_y = row_top + button_h + gap
+        go_width = right - left
+        usable = go_width - 2 * gap
+        go_box = (left + 2 * usable // 3 + 2 * gap, go_y, right, go_y + button_h)
+        active_go = self.click_state in ('turning', 'driving') and self._active_go == 'GO'
+        _push_button(canvas, go_box, self._go_button_text(),
+                     enabled=go_enabled or active_go, primary=True,
+                     active=active_go, pressed=self._pressed_click == 'GO')
         self._click_button_hits['GO'] = go_box
-        fixed_top = row_top + 104
-        for index, (label, amount) in enumerate((('GO-2', 2), ('GO-4', 4), ('GO-6', 6))):
-            bx0 = 8 + index * (left_w // 3)
-            bx1 = 8 + (index + 1) * (left_w // 3) - 4
-            box = (bx0, fixed_top, bx1, fixed_top + 40)
-            enabled = self.click_state == 'ready'
-            _push_button(canvas, box, label, enabled=enabled)
+        for index, (label, amount) in enumerate((('GO-2', 2), ('GO-4', 4))):
+            bx0 = left + index * usable // 3 + index * gap
+            bx1 = left + (index + 1) * usable // 3 + index * gap
+            box = (bx0, go_y, bx1, go_y + button_h)
+            active = self.click_state in ('turning', 'driving') and self._active_go == str(amount)
+            _push_button(canvas, box, label, enabled=can_go or active, active=active,
+                         pressed=self._pressed_click == str(amount))
             self._fixed_go_hits[str(amount)] = box
-        text(self.click_message[:45], 10, h - 12, (0, 255, 255), 0.52)
+        info_y = go_y + button_h + gap
+        info_bottom = top + h - margin
+        info_h = max(1, (info_bottom - info_y) // 4)
+        cv2.rectangle(canvas, (left, info_y), (right - 1, top + h - margin - 1),
+                      (90, 90, 90), 1)
+        tracking = ' TRACK LOST' if self.selected_target.status == 'lost' else ''
+        direction = (' RIGHT' if self.selected_target.bearing_deg > 0 else ' LEFT'
+                     ) if self.selected_target.status != 'idle' else ''
+        fit_text(canvas, 'Target: ' + angle + direction + tracking,
+                 (left, info_y, right, info_y + info_h), scale=0.55)
+        remaining = self._go_remaining_m() if self.click_state == 'driving' else None
+        message = (f'Remaining {display_linear(remaining, self.operator_units):.1f} '
+                   f'{self.operator_units}' if remaining is not None else self.click_message)
+        words = message.split()
+        lines = ['']
+        for word in words:
+            candidate = (lines[-1] + ' ' + word).strip()
+            width = cv2.getTextSize(candidate, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)[0][0]
+            if width > right - left - 8 and lines[-1] and len(lines) < 3:
+                lines.append(word)
+            else:
+                lines[-1] = candidate
+        for index, line in enumerate(lines):
+            y0 = info_y + (index + 1) * info_h
+            y1 = info_bottom if index == 2 else y0 + info_h
+            fit_text(canvas, line, (left, y0, right, y1), (0, 255, 255), scale=0.48)
 
-        text('DIRECTIONAL', mid + 12, top + 28, scale=0.75)
-        center = mid + (w - mid) // 2
-        radius = 40
-        diamond_y = top + 90
-        for key, cx, cy, vx, vy in (
-                ('FORWARD', center, diamond_y - radius, 0, -1),
-                ('LEFT', center - radius, diamond_y, -1, 0),
-                ('RIGHT', center + radius, diamond_y, 1, 0),
-                ('REVERSE', center, diamond_y + radius, 0, 1)):
-            box = (cx - 32, cy - 24, cx + 32, cy + 24)
+        fit_text(canvas, 'DIRECTIONAL', (first + margin, top, second - margin, row_top))
+        dleft, dright = first + margin, second - margin
+        dw = dright - dleft
+        for key, col, row, vx, vy in (
+                ('FORWARD', 1, 0, 0, -1), ('LEFT', 0, 1, -1, 0),
+                ('RIGHT', 2, 1, 1, 0), ('REVERSE', 1, 2, 0, 1)):
+            bx0 = dleft + col * dw // 3
+            bx1 = dleft + (col + 1) * dw // 3 - gap
+            by = row_top + row * (button_h + gap)
+            box = (bx0, by, bx1, by + button_h)
             _push_button(canvas, box, '', enabled=True)
             self._directional_hits[key] = box
-            cv2.arrowedLine(canvas, (cx - 12 * vx, cy - 12 * vy),
-                            (cx + 12 * vx, cy + 12 * vy),
+            cx, cy = (box[0] + box[2]) // 2, (box[1] + box[3]) // 2
+            length = min(12, button_h // 3, (bx1 - bx0) // 3)
+            cv2.arrowedLine(canvas, (cx - length * vx, cy - length * vy),
+                            (cx + length * vx, cy + length * vy),
                             (240, 240, 240), 3, cv2.LINE_AA, tipLength=0.45)
         actual, _ = directional_speeds(self.directional_speed, self.directional_settings)
-        text(f'{display_linear(actual, self.operator_units):.2f} {self.operator_units}/s',
-             mid + 12, top + 158, scale=0.62)
-        x0, x1 = mid + 8, w - 8
+        speed_top = top + h - margin - button_h
+        speed_label = f'{display_linear(actual, self.operator_units):.2f} {self.operator_units}/s'
+        directional_info_y = row_top + 3 * (button_h + gap)
+        fit_text(canvas, speed_label, (dleft, directional_info_y, dright, speed_top), scale=0.55)
         for index, name in enumerate(('SLOW', 'MEDIUM', 'FAST')):
-            left = x0 + index * (x1 - x0) // 3
-            right = x0 + (index + 1) * (x1 - x0) // 3 - 3
-            box = (left, top + 170, right, top + 212)
+            bx0 = dleft + index * dw // 3
+            bx1 = dleft + (index + 1) * dw // 3 - (gap if index < 2 else 0)
+            box = (bx0, speed_top, bx1, speed_top + button_h)
             _push_button(canvas, box, name, enabled=True,
                          active=(name == self.selected_speed_preset))
             self._directional_hits[name] = box
@@ -1514,7 +1602,7 @@ class DualCompressedViewer(Node):
             self.get_logger().warning(str(exc))
             return
 
-        if self.click_state in ('turning', 'driving', 'stopping', 'ready'):
+        if self.click_state in ('turning', 'driving', 'stopping'):
             return
         self.tracking_worker.select(pixel_x, pixel_y, bearing)
         self.selected_target = TargetTrackerState(
@@ -1522,7 +1610,7 @@ class DualCompressedViewer(Node):
             bearing_deg=bearing, status='initializing')
         self.click_state = 'selected'
         self.click_message = ('CLICK MOTION DISABLED' if not self.click_enable_motion
-                              else 'Select TURN or CANCEL')
+                              else 'Select TURN or GO')
 
         direction = 'RIGHT' if bearing > 0 else 'LEFT'
         self.get_logger().info(
@@ -1557,6 +1645,19 @@ class DualCompressedViewer(Node):
                     return True
         return False
 
+    def _track_click_press(self, event, x, y):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self._pressed_click = next(
+                (name for name, box in (*self._click_button_hits.items(),
+                                        *self._fixed_go_hits.items())
+                 if box[0] <= x < box[2] and box[1] <= y < box[3]), None)
+        elif event in (cv2.EVENT_LBUTTONUP, cv2.EVENT_MOUSEMOVE):
+            box = (self._click_button_hits.get(self._pressed_click)
+                   or self._fixed_go_hits.get(self._pressed_click))
+            if (event == cv2.EVENT_LBUTTONUP or box is None
+                    or not (box[0] <= x < box[2] and box[1] <= y < box[3])):
+                self._pressed_click = None
+
     def _handle_spray_mouse(self, event, x, y):
         panel = self._spray_panel
         if panel is None:
@@ -1588,23 +1689,26 @@ class DualCompressedViewer(Node):
                 message='DEPENDENCY MISSING',
                 durations={'circle': None, 'square': None, 'triangle': None})
         self._spray_panel, self._spray_hits = draw_spray_panel(
-            canvas, *self.front_display_size, snapshot, available=self.spray is not None)
+            canvas, (2 * self.front_display_size[0] // 3, self.front_display_size[1],
+                     self.front_display_size[0], canvas.shape[0]),
+            snapshot, available=self.spray is not None)
 
     def _on_front_mouse(self, event, x, y, _flags, _userdata):
         """Mouse callback for the separate front-camera window."""
+        self._track_click_press(event, x, y)
         if self._handle_motion_mouse(event, x, y, _flags):
             return
         if self._handle_spray_mouse(event, x, y):
             return
         if event == cv2.EVENT_LBUTTONUP:
-            if (self._directional_hits and self.front_display_size
-                    and y >= self.front_display_size[1] - 220):
+            if self.front_display_size and y >= self.front_display_size[1]:
                 self._click_handle_button(x, y)
                 return
             if not self._click_handle_button(x, y):
                 self._select_front_target(x, y)
 
     def _on_mouse(self, event, x, y, _flags, _userdata):
+        self._track_click_press(event, x, y)
         if self._handle_motion_mouse(event, x, y, _flags):
             return
         if self._handle_spray_mouse(event, x, y):
@@ -1615,10 +1719,10 @@ class DualCompressedViewer(Node):
         # Front-camera clicks select targets.
         if self.front_display_size is not None:
             fw, fh = self.front_display_size
+            if 0 <= x < fw and fh <= y < self._control_bottom:
+                self._click_handle_button(x, y)
+                return
             if 0 <= x < fw and 0 <= y < fh:
-                if self._directional_hits and y >= fh - 220:
-                    self._click_handle_button(x, y)
-                    return
                 if not self._click_handle_button(x, y):
                     self._select_front_target(x, y)
                 return
@@ -1781,10 +1885,6 @@ class DualCompressedViewer(Node):
                     left, (cx, cy), (0, 255, 255),
                     cv2.MARKER_CROSS, 24, 3
                 )
-                draw_turn_indicator(left, self.selected_target.bearing_deg)
-            else:
-                cv2.putText(left, 'TRACK LOST', (8, 34), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.8, (0, 180, 255), 2, cv2.LINE_AA)
 
         self.front_native_size = (left.shape[1], left.shape[0])
         if self._bearing_x_lookup is None:
@@ -1807,9 +1907,9 @@ class DualCompressedViewer(Node):
                 self._draw_dashboard(right_canvas, 0, panel_y)
                 right = right_canvas
 
-            self.front_display_size = (
-                left.shape[1], left.shape[0]
-            )
+            self.front_display_size = (left.shape[1], left.shape[0])
+            left = np.pad(left, ((0, 240), (0, 0), (0, 0)))
+            self._control_bottom = left.shape[0]
             cv2.setMouseCallback(
                 self.window_left, self._on_front_mouse
             )
@@ -1837,6 +1937,7 @@ class DualCompressedViewer(Node):
             return
 
         combo = compose(left, right, self.overlay.rear_scale)
+        combo = np.pad(combo, ((0, 240), (0, 0), (0, 0)))
         # IMPORTANT:
         # Check whether the window was closed BEFORE imshow().
         # Calling imshow() first would recreate a closed window.
@@ -1879,6 +1980,7 @@ class DualCompressedViewer(Node):
             round(native_front_w * combo.shape[1] / original_combo_w),
             round(native_front_h * combo.shape[0] / original_combo_h)
         )
+        self._control_bottom = combo.shape[0]
 
         self._click_poll()
         self._click_drive_buttons(combo, *self.front_display_size)

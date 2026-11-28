@@ -67,8 +67,8 @@ Point-and-click/point-and-turn is the preferred manual operating interface.
 Operational testing found tank steering less satisfactory than anticipated;
 the PS4 remains available as an optional alternative.
 
-The lower front-camera overlay contains enlarged click-to-drive controls on the
-left and enlarged directional hold-to-move controls on the right. Releasing a
+The strip beneath the front camera contains three panels: click-to-drive,
+directional hold-to-move, and spray controls. Releasing a
 direction, moving outside its button, or losing window focus requests a stop.
 A directional press cancels the current click motion and waits for
 acknowledgement before moving; canceled motions do not resume. The robot-side
@@ -118,12 +118,17 @@ After updating the repository launcher, install it with:
     install -m 755 ~/Workspaces/obot_ws/bin/obot-view2cams ~/bin/obot-view2cams
 
 The Pi's separate `max_viewer_linear_speed` limit must also permit the
-requested speed. Selecting a target does not move the robot: select TURN to
-rotate, then use the always-visible GO button to request LiDAR-based travel to
-the configured standoff distance (`go.target_standoff_m`, default `1.0`).
-GO-2/GO-4/GO-6 fixed-distance buttons (in current operator units) are also
-available after TURN completes. CANCEL stops or cancels the operation. The
-directional diamond takes priority over click-to-drive.
+requested speed. Selecting a target does not move the robot. TURN rotates
+toward it and completes independently. GO-2 and GO-4 request fixed travel in
+the current operator units; GO uses the front LiDAR distance minus the
+configured standoff (`go.target_standoff_m`, default `1.0` m). Each GO turns
+toward a selected target first, then drives without further confirmation; with
+no target it drives along the current heading. LiDAR GO uses a fresh valid
+measurement after turning and will not drive if it is unavailable. The
+destination is fixed when driving starts and remaining distance uses odometry.
+STOP interrupts either phase; the directional diamond takes priority over
+click-to-drive. The robot motion controller must run the matching updated
+implementation so it can confirm the result of the specific turn.
 The selected camera feature is followed by a visual tracker; a lost track is
 explicitly marked and is not retained as a valid target. Tracking is an
 operator aid and does not apply automatic steering corrections.
@@ -162,7 +167,7 @@ distance, final-approach speed transition (`final_approach_distance_m`,
 `final_approach_speed_mps`), and DRIVE completion. Motion requests still use a
 short ROS-time deadline, so robot and laptop clocks must be synchronized; late
 requests are rejected. On 2026-11-23, live operational testing on OBot-2
-confirmed that valve controls, directional diamond, TURN/CANCEL/GO, and speed
+confirmed that valve controls, directional diamond, TURN/STOP/GO, and speed
 selection worked as expected. This is the operator's reported result for that
 test, not a certification of all operating conditions.
 
@@ -215,14 +220,17 @@ and loop closures require a separate manual driving test.
 
 ### LiDAR operator overlay
 
-The front-camera image retains the centerline clearance and center-distance
-labels. It no longer shows separate left/right distance readouts. Nearby
+The front-camera image retains the centerline and clearance markers, but no
+longer shows center, left, or right distance readouts. Nearby
 returns in the robot-width forward corridor are grouped into localized colored
-blots and projected horizontally by bearing through the available fisheye
+rings and projected horizontally by bearing through the available fisheye
 calibration. Multiple groups can be shown at once; red takes precedence at or
 below the danger threshold, and yellow marks returns within the warning
 threshold. The defaults are 1.0 m (red) and 2.0 m (yellow). The center distance
-is measured forward from the configured bumper plane, not from the LiDAR.
+used by GO is measured forward from the configured bumper plane, not from the LiDAR.
+Each ring displays its measured distance in the selected operator units.
+`obstacle.min_diameter_fraction` and `obstacle.max_diameter_fraction` default
+to 0.015 and 0.05 of the front-camera width; the maximum may not exceed 0.05.
 
 The scanner points are transformed into `base_link` at the scan timestamp.
 Returns behind the bumper plane are excluded rather than clamped to zero; this
@@ -232,8 +240,8 @@ of `base_link` (0.260 m LiDAR position plus 0.04572 m to the leading edge).
 Set `lidar.front_bumper_x_m` to match the actual mounting if it changes.
 
 These indicators are visual aids only: they do not steer, avoid obstacles,
-brake, or control the watchdog. Absence of a blot is not evidence that the path
-is clear. Stale scans and unavailable transforms suppress obstacle blots and
+brake, or control the watchdog. Absence of a ring is not evidence that the path
+is clear. Stale scans and unavailable transforms suppress obstacle rings and
 are reported; the optional `LIDAR COVERAGE UNKNOWN` label flags a missing
 10-degree bin in the forward half-plane, which is only a coarse coverage
 indication. Sensor blind spots, reflective surfaces, field of view, and

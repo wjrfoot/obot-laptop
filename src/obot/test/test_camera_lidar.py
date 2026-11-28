@@ -1,5 +1,6 @@
 import math
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -114,7 +115,7 @@ def test_missing_invalid_ranges_are_not_a_clear_measurement(ranges):
     assert result.center_nearest_m is None
     assert result.coverage_uncertain
     labels = [text for text, _ in lidar_labels(displayed(result))]
-    assert labels == ['CENTER: --', 'LIDAR COVERAGE UNKNOWN']
+    assert labels == ['LIDAR COVERAGE UNKNOWN']
 
 
 def test_zero_range_is_invalid_even_when_declared_minimum_is_zero():
@@ -183,7 +184,7 @@ def test_unknown_coverage_does_not_hide_detected_hazard():
     reading = process_scan(msg, transform(x=0.260), LidarConfig())
     assert reading.coverage_uncertain
     labels = lidar_labels(displayed(reading), 'ft')
-    assert labels[0] == ('CENTER: 1.5 ft', (0, 0, 255))
+    assert displayed(reading).reading.front.severity == 'red'
     labels = [text for text, _ in labels]
     assert labels[-1] == 'LIDAR COVERAGE UNKNOWN'
 
@@ -255,9 +256,10 @@ def test_missing_return_hold_is_marked_and_expires_before_scan_staleness():
     state.put(LidarReading(1, None, None, 1, False), now[0])
     now[0] = 10.1
     state.put(LidarReading(None, None, None, None, False), now[0])
-    assert lidar_labels(state.snapshot(), 'ft')[0][0] == 'CENTER: ~3.3 ft'
+    assert state.snapshot().reading.front.held
+    assert state.snapshot().reading.front.distance_m == 1
     now[0] = 10.251
-    assert lidar_labels(state.snapshot())[0][0] == 'CENTER: --'
+    assert state.snapshot().reading.front.distance_m is None
     assert state.snapshot().status == 'ok'
     now[0] = 10.601
     assert lidar_labels(state.snapshot())[0][0] == 'LIDAR STALE'
@@ -292,13 +294,12 @@ def test_turn_indicator_is_compact_and_retains_direction(monkeypatch, bearing, e
 def test_center_obstacle_closer_than_median_remains_visible():
     reading = LidarReading(1.0, 0.5, None, 0.2, False)
     labels = lidar_labels(displayed(reading), 'ft')
-    assert labels == [('CENTER: 3.3 ft', (0, 255, 255)),
-                      ('NEAR: 0.7 ft', (0, 0, 255))]
+    assert labels == [('NEAR: 0.7 ft', (0, 0, 255))]
 
 
 def test_draw_labels_preserves_middle_and_adds_no_hitboxes():
     image = np.zeros((480, 640, 3), dtype=np.uint8)
-    reading = LidarReading(1.0, 0.5, None, 1.0, False)
+    reading = LidarReading(1.0, 0.5, None, 0.2, False)
     draw_lidar(image, displayed(reading))
     assert image[:100].any()
     assert not image[150:].any()
@@ -387,7 +388,7 @@ def test_draw_in_both_window_modes_preserves_markers_and_mouse_setup(monkeypatch
     viewer._draw_spray = DualCompressedViewer._draw_spray.__get__(viewer)
     DualCompressedViewer.draw(viewer)
     image = shown['combined' if combined else 'front']
-    assert image[:100, :640].any()
+    assert not image[:100, :640].any()
     assert tuple(image[240, 320]) == (0, 255, 0)
     assert viewer.front_display_size == (640, 480)
     viewer._click_drive_buttons.assert_called_once()
@@ -421,3 +422,24 @@ def test_obstacle_blob_threshold_validation():
     cfg = LidarConfig()
     with pytest.raises(ValueError):
         corridor_obstacle_blobs([(1.0, 0.0)], cfg, 0.0, 1.0)
+
+
+@pytest.mark.parametrize(('units', 'label'), [('m', '0.5 m'), ('ft', '1.6 ft')])
+def test_obstacle_indicator_is_hollow_bounded_and_labeled(monkeypatch, units, label):
+    import obot.dual_compressed_viewer as module
+
+    circle = Mock()
+    text = Mock()
+    monkeypatch.setattr(module.cv2, 'circle', circle)
+    monkeypatch.setattr(module.cv2, 'putText', text)
+    v = SimpleNamespace(
+        _latest_obstacles=[SimpleNamespace(bearing_rad=0.0, nearest_m=0.5, severity='red')],
+        _latest_scan_time=time.monotonic(),
+        lidar_config=SimpleNamespace(stale_timeout_s=1.0, warning_distance_m=2.0),
+        _bearing_x_lookup=[(0.0, 100)], _bearing_to_pixel=lambda _: 100,
+        obstacle_min_fraction=0.015, obstacle_max_fraction=0.05, operator_units=units)
+    DualCompressedViewer._draw_obstacle_indicators(v, np.zeros((480, 640, 3), dtype=np.uint8))
+    args = circle.call_args.args
+    assert args[4] == 2 and 2 * args[2] + args[4] <= 640 * 0.05
+    assert args[3] == (0, 0, 255)
+    assert text.call_args.args[1] == label

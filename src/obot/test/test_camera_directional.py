@@ -5,6 +5,7 @@ from unittest.mock import Mock
 
 import cv2
 import numpy as np
+from obot.camera_spray import SpraySnapshot
 from obot.dual_compressed_viewer import (
     DIRECTIONAL_DEFAULTS, directional_speeds, DualCompressedViewer,
     MotionWindowEvents, MovementRequest, TargetTrackerState, TargetTrackingWorker,
@@ -26,7 +27,7 @@ def viewer():
         selected_speed_preset='SLOW', operator_units='m',
         _manual_button=None, _manual_owned=False, _manual_future=None,
         _manual_kind=None, _slider_dragging=False, _directional_hits={},
-        _click_button_hits={}, _fixed_go_hits={},
+        _click_button_hits={}, _fixed_go_hits={}, _pressed_click=None, _pending_go=None,
         selected_target=TargetTrackerState(), click_state='idle',
         click_message='', target_standoff_m=1.0,
         click_enable_motion=True, directional_enable_motion=True,
@@ -34,6 +35,7 @@ def viewer():
         _manual_client=Mock(), _manual_last_send=0.0, _manual_future_started=0.0,
         combined_window='combined', window_left='front', show_side_by_side=True,
         _viewer_id='viewer', _viewer_sequence=0, _motion_session_ready=True,
+        _motion_result_id='viewer:1', _active_go=None, lidar=None,
         _go_requested_distance_m=None, _go_start_pose=None,
         _go_distance_from_lidar=Mock(return_value=4.0),
         _go_button_text=Mock(return_value='GO 4.0 m'),
@@ -44,30 +46,95 @@ def viewer():
     for name in ('_viewer_request', '_manual_send', '_manual_stop', '_manual_press',
                  '_manual_tick', '_handle_motion_mouse', '_fresh_center_distance',
                  '_go_distance_from_lidar', '_drive_progress_m', '_go_remaining_m',
-                 '_clear_selected_target'):
+                 '_clear_selected_target', '_track_click_press'):
         setattr(v, name, getattr(DualCompressedViewer, name).__get__(v))
     return v
 
 
-def test_panel_is_in_two_halves_and_registers_direction_buttons():
+def test_three_panels_are_below_camera_and_register_direction_buttons():
     v = viewer()
-    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    image = np.zeros((720, 640, 3), dtype=np.uint8)
     v.selected_target = TargetTrackerState(status='selected', bearing_deg=-29.2)
     v.click_state = 'selected'
     DualCompressedViewer._click_drive_buttons(v, image, 640, 480)
-    assert set(v._click_button_hits) == {'TURN', 'CANCEL', 'GO'}
-    assert set(v._fixed_go_hits) == {'2', '4', '6'}
+    assert set(v._click_button_hits) == {'TURN', 'STOP', 'GO'}
+    assert set(v._fixed_go_hits) == {'2', '4'}
     assert set(v._directional_hits) == {
         'FORWARD', 'REVERSE', 'LEFT', 'RIGHT', 'SLOW', 'MEDIUM', 'FAST'}
-    assert all(rect[2] <= 320 for rect in v._click_button_hits.values())
-    assert all(rect[0] >= 320 for rect in v._directional_hits.values())
-    assert not image[:230].any()
+    assert all(rect[2] <= 640 // 3 for rect in v._click_button_hits.values())
+    assert all(640 // 3 <= rect[0] < rect[2] <= 2 * 640 // 3
+               for rect in v._directional_hits.values())
+    assert not image[:480].any()
     assert all(rect[3] <= image.shape[0] for rect in (
         *v._click_button_hits.values(), *v._fixed_go_hits.values(),
         *v._directional_hits.values()))
-    for name in ('TURN', 'CANCEL'):
+    for name in ('TURN', 'STOP'):
         x0, y0, _, _ = v._click_button_hits[name]
         assert tuple(image[y0 + 2, x0 + 2]) != (0, 0, 0)
+
+
+@pytest.mark.parametrize(('width', 'camera_height', 'strip_height'), [
+    (640, 480, 240), (960, 720, 360), (320, 240, 240)])
+def test_control_panel_geometry_and_hitboxes(width, camera_height, strip_height):
+    v = viewer()
+    v.front_display_size = (width, camera_height)
+    v.spray = Mock()
+    v.spray.snapshot.return_value = SpraySnapshot(
+        'CLOSED', False, None, '', {'square': 2.0, 'circle': 4.0, 'triangle': 0.0})
+    image = np.zeros((camera_height + strip_height, width, 3), dtype=np.uint8)
+    DualCompressedViewer._click_drive_buttons(v, image, width, camera_height)
+    DualCompressedViewer._draw_spray(v, image)
+    first, second = width // 3, 2 * width // 3
+    assert v._spray_panel == (second, camera_height, width, image.shape[0])
+    assert all(camera_height <= box[1] < box[3] <= image.shape[0]
+               for box in (*v._click_button_hits.values(), *v._fixed_go_hits.values(),
+                           *v._directional_hits.values(), *v._spray_hits.values()))
+    assert all(second <= box[0] < box[2] <= width for box in v._spray_hits.values())
+    turn, stop, go = (v._click_button_hits[name] for name in ('TURN', 'STOP', 'GO'))
+    fixed = [v._fixed_go_hits[str(amount)] for amount in (2, 4)]
+    assert turn[1] == stop[1] and turn[2] <= stop[0]
+    assert go[2] == stop[2]
+    assert turn[3] < go[1] and go[1] == fixed[0][1]
+    assert all(box[1:4:2] == fixed[0][1:4:2] for box in fixed)
+    widths = [box[2] - box[0] for box in (*fixed, go)]
+    assert max(widths) - min(widths) <= 1
+    heights = {box[3] - box[1] for box in (
+        *v._click_button_hits.values(), *v._fixed_go_hits.values(),
+        *v._directional_hits.values(), *v._spray_hits.values())}
+    assert len(heights) == 1
+    assert abs(first - (second - first)) <= 1
+    assert abs(first - (width - second)) <= 1
+
+
+def test_stop_and_fixed_go_hitboxes_route_to_existing_handlers():
+    v = viewer()
+    v._click_turn = Mock()
+    v._click_go = Mock()
+    v._click_cancel = Mock()
+    v._click_go_fixed = Mock()
+    image = np.zeros((720, 640, 3), dtype=np.uint8)
+    DualCompressedViewer._click_drive_buttons(v, image, 640, 480)
+    for name in ('STOP', '2', '4'):
+        box = (v._click_button_hits if name == 'STOP' else v._fixed_go_hits)[name]
+        assert DualCompressedViewer._click_handle_button(
+            v, (box[0] + box[2]) // 2, (box[1] + box[3]) // 2)
+    v._click_cancel.assert_called_once()
+    assert [call.args[0] for call in v._click_go_fixed.call_args_list] == [2.0, 4.0]
+
+
+def test_front_camera_lower_area_remains_selectable():
+    v = viewer()
+    v.front_display_size = (640, 480)
+    v._control_bottom = 720
+    v._handle_motion_mouse = Mock(return_value=False)
+    v._handle_spray_mouse = Mock(return_value=False)
+    v._click_handle_button = Mock(return_value=False)
+    v._select_front_target = Mock()
+    v._on_dashboard_mouse = Mock()
+    DualCompressedViewer._on_mouse(v, cv2.EVENT_LBUTTONUP, 100, 450, 0, None)
+    v._select_front_target.assert_called_once_with(100, 450)
+    DualCompressedViewer._on_mouse(v, cv2.EVENT_LBUTTONUP, 100, 500, 0, None)
+    v._select_front_target.assert_called_once()
 
 
 @pytest.mark.parametrize('enabled', [False, True])
@@ -79,7 +146,7 @@ def test_turn_button_respects_click_motion_setting(enabled):
     v._click_request = Mock(return_value=True)
     v._click_turn = DualCompressedViewer._click_turn.__get__(v)
     v._click_handle_button = DualCompressedViewer._click_handle_button.__get__(v)
-    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    image = np.zeros((720, 640, 3), dtype=np.uint8)
     DualCompressedViewer._click_drive_buttons(v, image, 640, 480)
     x0, y0, _, _ = v._click_button_hits['TURN']
     assert v._click_handle_button(x0 + 2, y0 + 2)
@@ -347,9 +414,10 @@ def test_lidar_go_distance_uses_standoff_and_rejects_invalid_samples():
 def test_fixed_go_buttons_convert_selected_units():
     v = viewer()
     v.operator_units = 'ft'
+    v._begin_go = Mock()
     v._click_go_fixed = DualCompressedViewer._click_go_fixed.__get__(v)
     v._click_go_fixed(6.0)
-    v._request_drive.assert_called_once_with(pytest.approx(1.8288))
+    v._begin_go.assert_called_once_with(pytest.approx(1.8288))
 
 
 def test_remaining_distance_uses_odometry_progress():
@@ -360,6 +428,131 @@ def test_remaining_distance_uses_odometry_progress():
     v._latest_odom_pose = (2.5, 2.0, 0.0)
     v._latest_odom_time = time.monotonic()
     assert DualCompressedViewer._go_remaining_m(v) == pytest.approx(2.5)
+
+
+def operation_viewer():
+    v = viewer()
+    v._latest_odom_pose = (0.0, 0.0, 0.0)
+    v._latest_odom_time = time.monotonic()
+    v._click_last_status = time.monotonic()
+    v._click_request = Mock(return_value=True)
+    for name in ('_request_drive', '_start_go_drive', '_begin_go', '_click_go',
+                 '_click_go_fixed', '_click_turn', '_click_poll', '_click_cancel'):
+        setattr(v, name, getattr(DualCompressedViewer, name).__get__(v))
+    return v
+
+
+def status(v, state, message='result=success, request=viewer:1, active=None, pending=0'):
+    future = Mock()
+    future.done.return_value = True
+    future.result.return_value = SimpleNamespace(accepted=True, state=state, message=message)
+    v._click_future = future
+    v._click_request_kind = 'STATUS'
+    v._click_poll()
+
+
+@pytest.mark.parametrize('distance', [2.0, 4.0, 9.0])
+def test_go_without_target_drives_current_heading(distance):
+    v = operation_viewer()
+    v._begin_go(distance)
+    v._click_request.assert_called_once_with('DRIVE', distance=distance)
+    assert v.click_state == 'driving'
+    assert v._go_requested_distance_m == distance
+
+
+def test_combined_lidar_go_refreshes_after_turn_and_freezes_distance():
+    v = operation_viewer()
+    v.selected_target = TargetTrackerState(status='tracking', bearing_deg=20.0)
+    v.click_state = 'selected'
+    v._go_distance_from_lidar = Mock(side_effect=[8.0, 3.0])
+    v._click_go()
+    v._click_request.assert_called_once_with('TURN', 20.0)
+    assert v._go_distance_from_lidar.call_count == 0
+    v._click_saw_turn_motion = True
+    status(v, 'idle')
+    assert v._click_request.call_args.args == ('DRIVE',)
+    assert v._click_request.call_args.kwargs == {'distance': 8.0}
+    assert v._go_requested_distance_m == 8.0 and v.click_state == 'driving'
+    assert v._go_button_text() == 'GO 4.0 m'  # fixture mock
+    assert v._go_requested_distance_m == 8.0
+
+
+@pytest.mark.parametrize('outcome', ['failed', 'missing', 'invalid'])
+def test_combined_go_never_drives_after_failed_or_invalid_turn(outcome):
+    v = operation_viewer()
+    v.selected_target = TargetTrackerState(status='tracking', bearing_deg=20.0)
+    v.click_state = 'selected'
+    v._click_go()
+    v._click_saw_turn_motion = True
+    if outcome == 'invalid':
+        v._go_distance_from_lidar = Mock(return_value=None)
+    response = ('result=failed, reason=interrupted' if outcome == 'failed' else
+                'active=None' if outcome == 'missing'
+                else 'result=success, request=viewer:1, active=None')
+    status(v, 'idle', response)
+    assert [call.args[0] for call in v._click_request.call_args_list] == ['TURN']
+    assert v.click_state == 'ready'
+
+
+def test_standalone_turn_finishes_ready_and_allows_new_target():
+    v = operation_viewer()
+    v.selected_target = TargetTrackerState(status='tracking', bearing_deg=10.0)
+    v.click_state = 'selected'
+    v._click_turn()
+    v._click_saw_turn_motion = True
+    status(v, 'idle')
+    assert v.click_state == 'ready'
+    assert v.selected_target.status == 'idle'
+    assert v.click_message == 'Turn complete'
+    v._click_go_fixed(2)
+    assert v._click_request.call_args.kwargs == {'distance': 2.0}
+
+
+def test_unrelated_success_is_not_used_for_combined_go():
+    v = operation_viewer()
+    v.selected_target = TargetTrackerState(status='tracking', bearing_deg=10.0)
+    v.click_state = 'selected'
+    v._click_go_fixed(2)
+    v._click_saw_turn_motion = True
+    status(v, 'idle', 'result=success, request=other:1, active=None')
+    assert [call.args[0] for call in v._click_request.call_args_list] == ['TURN']
+    assert 'unconfirmed' in v.click_message
+
+
+def test_go_label_keeps_updating_during_turn_and_drive():
+    v = operation_viewer()
+    v._go_distance_from_lidar = Mock(side_effect=[4.0, 3.0])
+    v.click_state = 'turning'
+    assert DualCompressedViewer._go_button_text(v) == 'GO 4.0 m'
+    v.click_state = 'driving'
+    assert DualCompressedViewer._go_button_text(v) == 'GO 3.0 m'
+
+
+@pytest.mark.parametrize(('active_go', 'expected_label'), [('GO', 'GO 4.0 m'), ('2', 'GO-2')])
+def test_only_requested_go_button_is_active(monkeypatch, active_go, expected_label):
+    import obot.dual_compressed_viewer as module
+
+    buttons = Mock()
+    monkeypatch.setattr(module, '_push_button', buttons)
+    v = viewer()
+    v.click_state = 'driving'
+    v._active_go = active_go
+    image = np.zeros((720, 640, 3), dtype=np.uint8)
+    DualCompressedViewer._click_drive_buttons(v, image, 640, 480)
+    active_labels = [call.args[2] for call in buttons.call_args_list
+                     if call.kwargs.get('active') and call.args[1][0] < 640 // 3]
+    assert active_labels == [expected_label]
+
+
+@pytest.mark.parametrize('phase', ['turning', 'driving'])
+def test_stop_cancels_pending_combined_operation(phase):
+    v = operation_viewer()
+    v.click_state = phase
+    v._pending_go = ('fixed', 4.0)
+    v._click_future = Mock()
+    v._click_cancel()
+    assert v._pending_go is None and v.click_state == 'stopping'
+    assert v._click_request.call_args.args == ('STOP',)
 
 
 def test_tracker_worker_coalesces_frames_and_reports_tracking_loss():

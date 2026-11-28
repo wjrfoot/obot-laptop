@@ -124,24 +124,21 @@ def test_dashboard_renders_status_and_controls(status):
 
 @pytest.mark.parametrize(('width', 'height'), [
     (160, 120), (240, 180), (320, 240), (480, 360), (800, 600)])
-def test_reset_button_does_not_cover_wheel_speed_row(width, height):
-    panel, hits = render_dashboard(width, height, {
+def test_reset_button_does_not_cover_wheel_speed_row(width, height, monkeypatch):
+    original = cv2.putText
+    drawn = {}
+
+    def record(image, text, position, font, scale, color, thickness, line_type):
+        size, baseline = cv2.getTextSize(text, font, scale, thickness)
+        drawn[text] = (position, size, baseline)
+        return original(image, text, position, font, scale, color, thickness, line_type)
+
+    monkeypatch.setattr(cv2, 'putText', record)
+    _, hits = render_dashboard(width, height, {
         'wheels': {'left': 23.4, 'right': 22.7}})
-    if width < 200 or height < 160:
-        assert not hits
-        return
-    scale = min(1.5, max(0.55, 0.55 * min(width / 220, height / 180)))
-    row = max(18, min(62, height // 9))
-    margin = max(3, width // 50)
-    thickness = max(1, round(scale * 1.5))
-    expected = np.full((height, width, 3), 35, dtype=np.uint8)
-    cv2.putText(expected, 'WHEEL RPM  L +23.4  R +22.7', (margin, 4 * row),
-                cv2.FONT_HERSHEY_SIMPLEX, scale, (225, 225, 225),
-                thickness, cv2.LINE_AA)
-    wheel_pixels = np.any(expected != 35, axis=2)
-    assert np.array_equal(panel[wheel_pixels], expected[wheel_pixels])
-    assert hits['reset'][1] > np.nonzero(wheel_pixels)[0].max()
-    assert hits['reset'][0] - hits['source'][2] == 10
+    (x, y), (w, h), baseline = drawn['WHEEL RPM  L +23.4  R +22.7']
+    assert 0 <= x and x + w < width
+    assert 0 <= y - h and y + baseline < hits['reset'][1]
 
 
 @pytest.mark.parametrize(('width', 'height'), [
@@ -160,12 +157,8 @@ def test_reset_button_is_bottom_aligned_and_separate_from_selector(
 
     monkeypatch.setattr(cv2, 'putText', record)
     _, hits = render_dashboard(width, height, {'source': source})
-    if width < 200 or height < 160:
-        assert not hits
-        return
     (source_x, source_y), (source_w, source_h) = drawn[f'[{source.upper()} v]']
     (button_x, button_y), (button_w, button_h) = drawn['RESET ORIGIN']
-    assert hits['reset'][0] - hits['source'][2] == 10
     assert source_x + source_w <= hits['source'][2]
     assert hits['reset'][0] <= button_x
     assert button_x + button_w < hits['reset'][2]
@@ -188,9 +181,6 @@ def test_clear_button_fits_and_does_not_cover_other_rows(width, height, monkeypa
     monkeypatch.setattr(cv2, 'putText', record)
     _, hits = render_dashboard(width, height, {
         'health': 'NORMAL', 'notice': 'Path cleared'})
-    if width < 200 or height < 160:
-        assert not hits
-        return
     reset, clear = hits['reset'], hits['clear']
     assert 0 <= reset[0] < reset[2] < clear[0] < clear[2] <= width
     assert reset[1] == clear[1] and reset[3] == clear[3]
@@ -206,6 +196,52 @@ def test_clear_button_fits_and_does_not_cover_other_rows(width, height, monkeypa
     if 'WATCHDOG  Motors OK' in drawn:
         watch_y = drawn['WATCHDOG  Motors OK'][0][1]
         assert drawn['Path cleared'][0][1] - drawn['Path cleared'][1][1] > watch_y
+
+
+@pytest.mark.parametrize(('width', 'height'), [
+    (160, 120), (240, 180), (320, 240), (480, 360), (800, 600)])
+@pytest.mark.parametrize('units', ['m', 'ft'])
+@pytest.mark.parametrize('source_menu', [False, True])
+def test_all_telemetry_lines_fit_without_overlap(
+        width, height, units, source_menu, monkeypatch):
+    original = cv2.putText
+    drawn = []
+
+    def record(image, text, position, font, scale, color, thickness, line_type):
+        size, baseline = cv2.getTextSize(text, font, scale, thickness)
+        if text:
+            drawn.append((text, position, size, baseline))
+        return original(image, text, position, font, scale, color, thickness, line_type)
+
+    monkeypatch.setattr(cv2, 'putText', record)
+    _, hits = render_dashboard(width, height, {
+        'command': (1.0, -0.5), 'actual': (0.9, -0.4),
+        'wheels': {'left': 123.4, 'right': -456.7},
+        'source': 'odom', 'position': (1234.5, -9876.5, 1.2),
+        'voltage_left': 24.5, 'voltage_right': 24.6,
+        'health': 'NORMAL', 'notice': 'Path cleared', 'units': units,
+        'source_menu': source_menu})
+    telemetry = [item for item in drawn
+                 if item[0] not in ('RESET ORIGIN', 'CLEAR PATH', 'Odom', 'Map')]
+    assert len(telemetry) == 11
+    assert any(text.startswith('WATCHDOG') for text, *_ in telemetry)
+    assert any(text.startswith('WHEEL RPM') for text, *_ in telemetry)
+    assert any(text.startswith('X ') for text, *_ in telemetry)
+    for _, (x, y), (w, h), baseline in telemetry:
+        assert 0 <= x and x + w < width
+        assert 0 <= y - h and y + baseline < hits['reset'][1]
+    for before, after in zip(telemetry, telemetry[1:]):
+        assert before[1][1] + before[3] < after[1][1] - after[2][1]
+    if source_menu:
+        for text, (x, y), (w, h), baseline in drawn:
+            if text in ('Odom', 'Map'):
+                box = hits[text.lower()]
+                assert box[0] <= x and x + w < box[2]
+                assert box[1] <= y - h and y + baseline < box[3]
+        assert hits['source'][3] <= hits['odom'][1]
+        assert hits['odom'][3] <= telemetry[5][1][1] - telemetry[5][2][1]
+    assert hits['reset'][1] == hits['clear'][1]
+    assert hits['reset'][2] <= hits['clear'][0]
 
 
 def test_maximize_window_selects_only_named_window(monkeypatch):
@@ -249,7 +285,7 @@ def test_viewer_composites_camera_and_dashboard_and_checks_tf(monkeypatch):
         node.on_right(msg)
         node.draw()
         maximize.assert_called_once_with(node.combined_window)
-        assert images[-1].shape == (480, 960, 3)
+        assert images[-1].shape == (720, 960, 3)
         assert np.any(images[-1][240:, 640:] != 0)
         assert node.left_msg_count == node.right_msg_count == 1
 
@@ -282,7 +318,7 @@ def test_viewer_composites_camera_and_dashboard_and_checks_tf(monkeypatch):
         images.clear()
         node.draw()
         assert [img.shape for img in images] == [
-            (480, 640, 3), (480, 320, 3)]
+            (720, 640, 3), (480, 320, 3)]
     finally:
         node.destroy_node()
         rclpy.shutdown()
@@ -308,8 +344,8 @@ def test_upscaled_dashboard_and_mouse_hitboxes(monkeypatch):
         node.last_left = node.last_right = image
         node.telemetry.put('pose_odom', (1.0, 2.0, 0.5))
         node.draw()
-        assert images[-1].shape == (720, 1440, 3)
-        assert node._panel.shape == (360, 480, 3)
+        assert images[-1].shape == (720, 720, 3)
+        assert node._panel.shape == (540, 240, 3)
         x0, y0, x1, y1 = node._panel_hits['reset']
         assert np.any(node._panel[y0:y1, x0:x1] != (35, 35, 35))
         px, py = node._panel_origin
@@ -320,8 +356,8 @@ def test_upscaled_dashboard_and_mouse_hitboxes(monkeypatch):
                             lambda name: (0, 0, 720, 360))
         node.last_draw_time = 0
         node.draw()
-        assert images[-1].shape == (360, 720, 3)
-        assert node._panel.shape == (180, 240, 3)
+        assert images[-1].shape == (480, 480, 3)
+        assert node._panel.shape == (360, 160, 3)
     finally:
         node.destroy_node()
         rclpy.shutdown()
@@ -389,6 +425,7 @@ def test_clear_button_click_does_not_reset_origin():
         _panel_hits={'clear': (100, 50, 150, 70)},
         _clear_path=Mock(), _panel_time=1.0,
         front_display_size=None, _handle_motion_mouse=Mock(return_value=False),
+        _track_click_press=Mock(),
         _handle_spray_mouse=Mock(return_value=False))
     viewer._on_dashboard_mouse = lambda x, y: DualCompressedViewer._on_dashboard_mouse(
         viewer, x, y)

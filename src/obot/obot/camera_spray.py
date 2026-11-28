@@ -6,12 +6,13 @@ import time
 
 from action_msgs.msg import GoalStatus
 from action_msgs.srv import CancelGoal
-import cv2
 from rcl_interfaces.msg import ParameterType
 from rcl_interfaces.srv import GetParameters
 from rclpy.action import ActionClient
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool
+
+from .camera_controls import fit_text, push_button
 
 
 MODE_NAMES = ('circle', 'square', 'triangle')
@@ -309,39 +310,34 @@ class SprayControl:
                     f'Spray action failed: {result.result.message}')
 
 
-def draw_spray_panel(canvas, front_w, front_h, snapshot: SpraySnapshot, available=True):
+def draw_spray_panel(canvas, panel, snapshot: SpraySnapshot, available=True):
     """Draw the spray controls and return panel and button hitboxes."""
-    w, h = min(front_w, canvas.shape[1]), min(front_h, canvas.shape[0])
-    if w < 560 or h < 300:
+    x0, y0, x1, y1 = panel
+    w, h = x1 - x0, y1 - y0
+    if w < 100 or h < 150:
         return None, {}
-    x, y = 8, 12
-    panel = (x, y, x + 340, y + 124)
-    cv2.rectangle(canvas, (x, y), (panel[2], panel[3]), (30, 30, 30), -1)
-    cv2.rectangle(canvas, (x, y), (panel[2], panel[3]), (200, 200, 200), 2)
-    cv2.putText(canvas, 'SPRAY ' + snapshot.state, (x + 10, y + 28),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.78, (235, 235, 235), 2, cv2.LINE_AA)
+    margin = max(4, round(w * 0.025))
+    gap = max(3, margin // 2)
+    header = max(24, round(h * 0.14))
+    button_h = max(24, round(h * 0.16))
+    fit_text(canvas, 'SPRAY ' + snapshot.state,
+             (x0 + margin, y0, x1 - margin, y0 + header))
     hits = {}
-    for index, name in enumerate(('square', 'circle', 'triangle', 'cancel')):
-        bx, by = x + 10 + index * 82, y + 40
-        hits[name] = (bx, by, bx + 74, by + 48)
-        if name == 'cancel':
-            enabled = available and snapshot.active
-            label = 'STOP'
-        else:
-            duration = snapshot.durations.get(name)
-            enabled = available and not snapshot.active and duration is not None and duration > 0.0
-            label = '--' if duration is None else f'{duration:.1f}s'
-        fill = (45, 75, 200) if name == 'cancel' and enabled else (
-            (40, 125, 40) if enabled else (70, 70, 70))
-        edge = (210, 210, 210) if enabled else (120, 120, 120)
-        cv2.rectangle(canvas, (bx, by), (bx + 74, by + 48), fill, -1)
-        cv2.rectangle(canvas, (bx, by), (bx + 74, by + 48), edge, 2)
-        cv2.putText(canvas, name.upper(), (bx + 8, by + 18),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, edge, 1, cv2.LINE_AA)
-        cv2.putText(canvas, label, (bx + 8, by + 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.62, edge, 2, cv2.LINE_AA)
+    left, right = x0 + margin, x1 - margin
+    by = y0 + header
+    for index, name in enumerate(('square', 'circle', 'triangle')):
+        bx0 = left + index * (right - left) // 3
+        bx1 = left + (index + 1) * (right - left) // 3 - gap
+        hits[name] = (bx0, by, bx1, by + button_h)
+        duration = snapshot.durations.get(name)
+        enabled = available and not snapshot.active and duration is not None and duration > 0.0
+        label = '--' if duration is None else f'{duration:.1f}s'
+        push_button(canvas, hits[name], label, enabled=enabled)
+    stop_y = by + button_h + gap
+    hits['cancel'] = (left, stop_y, right - gap, stop_y + button_h)
+    push_button(canvas, hits['cancel'], 'STOP', enabled=available and snapshot.active)
     detail = f'{snapshot.remaining:.1f}s ' if snapshot.remaining is not None else ''
     detail += snapshot.message
-    cv2.putText(canvas, detail[:36], (x + 10, y + 112),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.53, (0, 220, 255), 1, cv2.LINE_AA)
+    fit_text(canvas, detail, (left, stop_y + button_h + gap, right, y1 - margin),
+             (0, 220, 255), scale=0.55)
     return panel, hits
