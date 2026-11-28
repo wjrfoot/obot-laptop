@@ -68,7 +68,13 @@ Operational testing found tank steering less satisfactory than anticipated;
 the PS4 remains available as an optional alternative.
 
 The strip beneath the front camera contains three panels: click-to-drive,
-directional hold-to-move, and spray controls. Releasing a
+directional hold-to-move, and spray controls. It occupies approximately one
+quarter of the interface height, leaving the remaining space for the cameras.
+In the combined view the right column is half the front-camera width; the rear
+camera fits in its upper half-height region, with telemetry below it. The
+composite is scaled uniformly to fit the window. `rear_scale` still controls
+the rear-camera size in separate-window mode.
+Releasing a
 direction, moving outside its button, or losing window focus requests a stop.
 A directional press cancels the current click motion and waits for
 acknowledgement before moving; canceled motions do not resume. The robot-side
@@ -129,6 +135,15 @@ destination is fixed when driving starts and remaining distance uses odometry.
 STOP interrupts either phase; the directional diamond takes priority over
 click-to-drive. The robot motion controller must run the matching updated
 implementation so it can confirm the result of the specific turn.
+Automatic travel after a turn is authorized against that turn on the robot;
+STOP invalidates the continuation even if an earlier completion response arrives
+later. The continuation uses existing `ClickDrive` permit fields; if the
+controller does not confirm support, automatic travel does not start. The
+laptop and robot must use matching `ClickDrive` definitions.
+An initial movement request from another client that has not yet reached the
+robot when STOP is processed cannot be identified as having preceded that STOP.
+Likewise, a global spray cancel cannot cancel another client's goal that the
+action server has not yet received.
 The selected camera feature is followed by a visual tracker; a lost track is
 explicitly marked and is not retained as a valid target. Tracking is an
 operator aid and does not apply automatic steering corrections.

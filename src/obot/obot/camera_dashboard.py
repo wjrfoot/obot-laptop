@@ -23,7 +23,7 @@ def render_dashboard(width, height, data):
     button_height = max(18, min(42, height // 8))
     button_top = height - margin - button_height
     available_height = button_top - margin - gap
-    row = available_height / (12 if data.get('source_menu') else 11)
+    row = min(24, available_height / (12 if data.get('source_menu') else 11))
     cmd = data.get('command')
     actual = data.get('actual')
     units = data.get('units', 'm')

@@ -74,7 +74,7 @@ def test_three_panels_are_below_camera_and_register_direction_buttons():
 
 
 @pytest.mark.parametrize(('width', 'camera_height', 'strip_height'), [
-    (640, 480, 240), (960, 720, 360), (320, 240, 240)])
+    (640, 480, 160), (960, 720, 240), (320, 240, 80)])
 def test_control_panel_geometry_and_hitboxes(width, camera_height, strip_height):
     v = viewer()
     v.front_display_size = (width, camera_height)
@@ -97,11 +97,17 @@ def test_control_panel_geometry_and_hitboxes(width, camera_height, strip_height)
     assert turn[3] < go[1] and go[1] == fixed[0][1]
     assert all(box[1:4:2] == fixed[0][1:4:2] for box in fixed)
     widths = [box[2] - box[0] for box in (*fixed, go)]
-    assert max(widths) - min(widths) <= 1
+    assert widths[0] == widths[1] and widths[2] > widths[0]
     heights = {box[3] - box[1] for box in (
         *v._click_button_hits.values(), *v._fixed_go_hits.values(),
         *v._directional_hits.values(), *v._spray_hits.values())}
     assert len(heights) == 1
+    assert heights.pop() <= 30
+    arrows = v._directional_hits
+    assert arrows['FORWARD'][3] <= arrows['LEFT'][1]
+    assert arrows['LEFT'][3] <= arrows['REVERSE'][1]
+    assert 0 <= arrows['SLOW'][1] - arrows['REVERSE'][3] <= 4
+    assert strip_height / (camera_height + strip_height) == pytest.approx(0.25)
     assert abs(first - (second - first)) <= 1
     assert abs(first - (width - second)) <= 1
 
@@ -120,6 +126,38 @@ def test_stop_and_fixed_go_hitboxes_route_to_existing_handlers():
             v, (box[0] + box[2]) // 2, (box[1] + box[3]) // 2)
     v._click_cancel.assert_called_once()
     assert [call.args[0] for call in v._click_go_fixed.call_args_list] == [2.0, 4.0]
+
+
+def test_compact_direction_and_speed_hitboxes_route_to_expected_controls():
+    v = viewer()
+    v._manual_press = Mock()
+    DualCompressedViewer._click_drive_buttons(v, np.zeros((640, 640, 3), dtype=np.uint8),
+                                              640, 480)
+    for name in ('FORWARD', 'LEFT', 'RIGHT', 'REVERSE'):
+        x0, y0, x1, y1 = v._directional_hits[name]
+        assert v._handle_motion_mouse(
+            cv2.EVENT_LBUTTONDOWN, (x0 + x1) // 2, (y0 + y1) // 2, 0)
+        assert v._manual_press.call_args.args == (name,)
+    x0, y0, x1, y1 = v._directional_hits['FAST']
+    assert v._handle_motion_mouse(
+        cv2.EVENT_LBUTTONDOWN, (x0 + x1) // 2, (y0 + y1) // 2, 0)
+    assert v.selected_speed_preset == 'FAST'
+
+
+def test_compact_variable_go_label_remains_readable(monkeypatch):
+    v = viewer()
+    v._go_button_text.return_value = 'GO 4.2 m'
+    scales = {}
+    original = cv2.putText
+
+    def record(image, text, position, font, scale, *args):
+        scales[text] = scale
+        return original(image, text, position, font, scale, *args)
+
+    monkeypatch.setattr(cv2, 'putText', record)
+    DualCompressedViewer._click_drive_buttons(v, np.zeros((640, 640, 3), dtype=np.uint8),
+                                              640, 480)
+    assert scales['GO 4.2 m'] >= 0.32
 
 
 def test_front_camera_lower_area_remains_selectable():
@@ -306,6 +344,24 @@ def test_new_viewer_waits_for_stop_and_permit_before_turn():
     assert operation.done()
 
 
+def test_older_controller_cannot_authorize_automatic_turn_continuation():
+    v = viewer()
+    ready = Mock()
+    ready.done.return_value = True
+    ready.result.return_value = SimpleNamespace(
+        accepted=True, permit_id='permit', message='Movement permit issued')
+    v._manual_client.call_async.return_value = ready
+    request = v._viewer_request('DRIVE')
+    request.permit_command = 'viewer:1'
+    operation = MovementRequest(v, v._manual_client, request)
+    prepared = v._manual_client.call_async.call_args.args[0]
+    assert prepared.command == 'PREPARE' and prepared.permit_id == 'viewer:1'
+    assert operation.done()
+    assert not operation.result().accepted
+    assert 'cannot confirm' in operation.result().message
+    assert v._manual_client.call_async.call_count == 1
+
+
 def test_late_permit_response_is_not_sent_after_manual_release():
     v = viewer()
     pending = Mock()
@@ -330,6 +386,18 @@ def test_cancel_does_not_wait_for_pending_click_request():
     DualCompressedViewer._click_cancel(v)
     assert v._click_future is None
     v._click_request.assert_called_once_with('STOP')
+
+
+def test_click_stop_interrupts_manual_and_sends_stop_when_idle():
+    v = viewer()
+    v._manual_button = 'FORWARD'
+    v._manual_owned = True
+    v._click_request = Mock(return_value=True)
+    DualCompressedViewer._click_cancel(v)
+    assert v._manual_button is None and not v._manual_owned
+    assert v._manual_client.call_async.call_args.args[0].command == 'MANUAL_END'
+    v._click_request.assert_called_once_with('STOP')
+    assert v.click_state == 'stopping'
 
 
 def test_rear_window_click_does_not_trigger_front_controls():
@@ -455,7 +523,7 @@ def status(v, state, message='result=success, request=viewer:1, active=None, pen
 def test_go_without_target_drives_current_heading(distance):
     v = operation_viewer()
     v._begin_go(distance)
-    v._click_request.assert_called_once_with('DRIVE', distance=distance)
+    v._click_request.assert_called_once_with('DRIVE', distance=distance, continuation_of='')
     assert v.click_state == 'driving'
     assert v._go_requested_distance_m == distance
 
@@ -471,7 +539,8 @@ def test_combined_lidar_go_refreshes_after_turn_and_freezes_distance():
     v._click_saw_turn_motion = True
     status(v, 'idle')
     assert v._click_request.call_args.args == ('DRIVE',)
-    assert v._click_request.call_args.kwargs == {'distance': 8.0}
+    assert v._click_request.call_args.kwargs == {
+        'distance': 8.0, 'continuation_of': 'viewer:1'}
     assert v._go_requested_distance_m == 8.0 and v.click_state == 'driving'
     assert v._go_button_text() == 'GO 4.0 m'  # fixture mock
     assert v._go_requested_distance_m == 8.0
@@ -505,7 +574,7 @@ def test_standalone_turn_finishes_ready_and_allows_new_target():
     assert v.selected_target.status == 'idle'
     assert v.click_message == 'Turn complete'
     v._click_go_fixed(2)
-    assert v._click_request.call_args.kwargs == {'distance': 2.0}
+    assert v._click_request.call_args.kwargs == {'distance': 2.0, 'continuation_of': ''}
 
 
 def test_unrelated_success_is_not_used_for_combined_go():

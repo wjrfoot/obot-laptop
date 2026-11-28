@@ -3,6 +3,15 @@
 import cv2
 
 
+def control_metrics(width, height):
+    """Return shared compact control-panel spacing."""
+    margin = max(3, round(width * 0.02))
+    gap = max(2, margin // 2)
+    header = max(11, round(height * 0.12))
+    button_height = max(12, min(30, round(height * 0.16)))
+    return margin, gap, header, button_height
+
+
 def fit_text(canvas, text, box, color=(235, 235, 235), scale=0.65, thickness=1):
     """Draw a single line centered inside a bounding box."""
     x0, y0, x1, y1 = box

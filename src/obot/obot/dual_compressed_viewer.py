@@ -24,7 +24,7 @@ from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from .camera_controls import fit_text, push_button as _push_button
+from .camera_controls import control_metrics, fit_text, push_button as _push_button
 from .camera_dashboard import render_dashboard
 from .camera_lidar import (
     center_distance, corridor_distances, corridor_obstacle_blobs, LidarConfig,
@@ -471,7 +471,7 @@ def display_sized_image(image, window_name):
         return image
     image_h, image_w = image.shape[:2]
     factor = min(width / image_w, height / image_h)
-    if factor <= 1:
+    if factor == 1:
         return image
     size = (max(1, round(image_w * factor)),
             max(1, round(image_h * factor)))
@@ -548,6 +548,7 @@ class MovementRequest:
         prepare.client_id = self.request.client_id
         prepare.sequence = self.request.sequence
         prepare.permit_command = self.request.command
+        prepare.permit_id = self.request.permit_command
         return self.client.call_async(prepare)
 
     def done(self):
@@ -559,6 +560,11 @@ class MovementRequest:
             response = self.future.result()
             if not response.accepted or self.stage == 'movement':
                 self.response = response
+                return True
+            if (self.stage == 'prepare' and self.request.permit_command
+                    and response.message != 'Turn continuation permit issued'):
+                self.response = ClickDrive.Response()
+                self.response.message = 'Motion controller cannot confirm turn continuation'
                 return True
             if time.monotonic() - self.started > 0.2:
                 self.response = ClickDrive.Response()
@@ -1150,7 +1156,7 @@ class DualCompressedViewer(Node):
             cv2.putText(image, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX,
                         0.45, color, 1, cv2.LINE_AA)
 
-    def _click_request(self, command, angle=0.0, distance=0.0):
+    def _click_request(self, command, angle=0.0, distance=0.0, continuation_of=''):
         """Nonblocking ROS service call; results processed in draw()."""
         if self._click_future is not None:
             return False
@@ -1160,6 +1166,7 @@ class DualCompressedViewer(Node):
         request = self._viewer_request(command)
         request.angle_deg = float(angle)
         request.distance_m = float(distance)
+        request.permit_command = continuation_of
         if command in ('TURN', 'DRIVE'):
             self._click_future = MovementRequest(self, self._click_client, request)
             self._motion_result_id = f'{request.client_id}:{request.sequence}'
@@ -1289,17 +1296,14 @@ class DualCompressedViewer(Node):
             self.click_message = 'TURN requested...'
 
     def _click_cancel(self):
+        self._manual_stop()
         self._pending_go = None
-        if self.click_state == 'selected':
-            self._clear_selected_target()
-            self.click_state = 'idle'
-            self.click_message = 'Target canceled'
-        elif self.click_state in ('ready', 'turning', 'driving', 'stopping'):
-            self._click_future = None
-            self._click_request_kind = None
-            self.click_state = 'stopping'
-            self.click_message = 'STOP pending...'
-            self._click_request('STOP')
+        self._clear_selected_target()
+        self._click_future = None
+        self._click_request_kind = None
+        self.click_state = 'stopping'
+        self.click_message = 'STOP pending...'
+        self._click_request('STOP')
 
     def _universal_stop(self):
         """Request motion and spray cancellation without waiting for the GUI."""
@@ -1316,7 +1320,7 @@ class DualCompressedViewer(Node):
         if self.spray is not None:
             self.spray.cancel_all()
 
-    def _request_drive(self, distance):
+    def _request_drive(self, distance, continuation_of=''):
         if self._manual_button is not None:
             return
         if self.click_state not in ('idle', 'selected', 'ready') or self._click_future is not None:
@@ -1327,7 +1331,7 @@ class DualCompressedViewer(Node):
         if not self.click_enable_motion:
             self.click_message = 'CLICK MOTION DISABLED'
             return
-        if self._click_request('DRIVE', distance=distance):
+        if self._click_request('DRIVE', distance=distance, continuation_of=continuation_of):
             self.click_state = 'driving'
             self._click_saw_drive_motion = False
             self._go_requested_distance_m = distance
@@ -1358,13 +1362,13 @@ class DualCompressedViewer(Node):
             return
         self._start_go_drive(distance)
 
-    def _start_go_drive(self, distance):
+    def _start_go_drive(self, distance, continuation_of=''):
         if distance is None:
             distance = self._go_distance_from_lidar()
             if distance is None:
                 self.click_message = 'GO unavailable: center LiDAR invalid or stale'
                 return
-        self._request_drive(distance)
+        self._request_drive(distance, continuation_of=continuation_of)
 
     def _click_go(self):
         was_ready = self.click_state in ('idle', 'selected', 'ready')
@@ -1428,7 +1432,7 @@ class DualCompressedViewer(Node):
                             self._clear_selected_target()
                             self.click_message = 'Turn complete'
                             if pending is not None:
-                                self._start_go_drive(pending[1])
+                                self._start_go_drive(pending[1], self._motion_result_id)
                     elif self.click_state == 'driving' and self._click_saw_drive_motion:
                         self.click_state = 'idle'
                         self._clear_selected_target()
@@ -1457,16 +1461,13 @@ class DualCompressedViewer(Node):
         w = min(front_w, canvas.shape[1])
         top = front_h
         h = canvas.shape[0] - top
-        if w < 300 or h < 150:
+        if w < 300 or h < 75:
             return
         first, second = w // 3, 2 * w // 3
         cv2.rectangle(canvas, (0, top), (w - 1, top + h - 1), (30, 30, 30), -1)
         for x in (first, second):
             cv2.line(canvas, (x, top), (x, top + h - 1), (130, 130, 130), 1)
-        margin = max(4, round(first * 0.025))
-        gap = max(3, margin // 2)
-        header = max(24, round(h * 0.14))
-        button_h = max(24, round(h * 0.16))
+        margin, gap, header, button_h = control_metrics(first, h)
         row_top = top + header
         fit_text(canvas, 'CLICK-TO-DRIVE', (margin, top, first - margin, row_top))
         angle = '--'
@@ -1480,8 +1481,7 @@ class DualCompressedViewer(Node):
                     and self.click_state == 'selected')
         _push_button(canvas, turn_box, 'TURN', enabled=can_turn or self.click_state == 'turning',
                      active=self.click_state == 'turning', pressed=self._pressed_click == 'TURN')
-        _push_button(canvas, stop_box, 'STOP', enabled=self.click_state != 'idle',
-                     pressed=self._pressed_click == 'STOP')
+        _push_button(canvas, stop_box, 'STOP', pressed=self._pressed_click == 'STOP')
         self._click_button_hits['TURN'] = turn_box
         self._click_button_hits['STOP'] = stop_box
         can_go = self.click_state in ('idle', 'selected', 'ready')
@@ -1490,15 +1490,16 @@ class DualCompressedViewer(Node):
         go_y = row_top + button_h + gap
         go_width = right - left
         usable = go_width - 2 * gap
-        go_box = (left + 2 * usable // 3 + 2 * gap, go_y, right, go_y + button_h)
+        fixed_width = 3 * usable // 10
+        go_box = (left + 2 * fixed_width + 2 * gap, go_y, right, go_y + button_h)
         active_go = self.click_state in ('turning', 'driving') and self._active_go == 'GO'
         _push_button(canvas, go_box, self._go_button_text(),
                      enabled=go_enabled or active_go, primary=True,
                      active=active_go, pressed=self._pressed_click == 'GO')
         self._click_button_hits['GO'] = go_box
         for index, (label, amount) in enumerate((('GO-2', 2), ('GO-4', 4))):
-            bx0 = left + index * usable // 3 + index * gap
-            bx1 = left + (index + 1) * usable // 3 + index * gap
+            bx0 = left + index * (fixed_width + gap)
+            bx1 = bx0 + fixed_width
             box = (bx0, go_y, bx1, go_y + button_h)
             active = self.click_state in ('turning', 'driving') and self._active_go == str(amount)
             _push_button(canvas, box, label, enabled=can_go or active, active=active,
@@ -1506,8 +1507,9 @@ class DualCompressedViewer(Node):
             self._fixed_go_hits[str(amount)] = box
         info_y = go_y + button_h + gap
         info_bottom = top + h - margin
-        info_h = max(1, (info_bottom - info_y) // 4)
-        cv2.rectangle(canvas, (left, info_y), (right - 1, top + h - margin - 1),
+        info_h = max(1, min(20, (info_bottom - info_y) // 4))
+        cv2.rectangle(canvas, (left, info_y),
+                      (right - 1, min(info_bottom, info_y + 4 * info_h) - 1),
                       (90, 90, 90), 1)
         tracking = ' TRACK LOST' if self.selected_target.status == 'lost' else ''
         direction = (' RIGHT' if self.selected_target.bearing_deg > 0 else ' LEFT'
@@ -1528,10 +1530,13 @@ class DualCompressedViewer(Node):
                 lines[-1] = candidate
         for index, line in enumerate(lines):
             y0 = info_y + (index + 1) * info_h
-            y1 = info_bottom if index == 2 else y0 + info_h
+            y1 = min(info_bottom, y0 + info_h)
             fit_text(canvas, line, (left, y0, right, y1), (0, 255, 255), scale=0.48)
 
-        fit_text(canvas, 'DIRECTIONAL', (first + margin, top, second - margin, row_top))
+        actual, _ = directional_speeds(self.directional_speed, self.directional_settings)
+        speed_label = f'{display_linear(actual, self.operator_units):.2f} {self.operator_units}/s'
+        fit_text(canvas, f'DIRECTIONAL  {speed_label}',
+                 (first + margin, top, second - margin, row_top))
         dleft, dright = first + margin, second - margin
         dw = dright - dleft
         for key, col, row, vx, vy in (
@@ -1548,11 +1553,7 @@ class DualCompressedViewer(Node):
             cv2.arrowedLine(canvas, (cx - length * vx, cy - length * vy),
                             (cx + length * vx, cy + length * vy),
                             (240, 240, 240), 3, cv2.LINE_AA, tipLength=0.45)
-        actual, _ = directional_speeds(self.directional_speed, self.directional_settings)
-        speed_top = top + h - margin - button_h
-        speed_label = f'{display_linear(actual, self.operator_units):.2f} {self.operator_units}/s'
-        directional_info_y = row_top + 3 * (button_h + gap)
-        fit_text(canvas, speed_label, (dleft, directional_info_y, dright, speed_top), scale=0.55)
+        speed_top = row_top + 3 * (button_h + gap)
         for index, name in enumerate(('SLOW', 'MEDIUM', 'FAST')):
             bx0 = dleft + index * dw // 3
             bx1 = dleft + (index + 1) * dw // 3 - (gap if index < 2 else 0)
@@ -1908,7 +1909,7 @@ class DualCompressedViewer(Node):
                 right = right_canvas
 
             self.front_display_size = (left.shape[1], left.shape[0])
-            left = np.pad(left, ((0, 240), (0, 0), (0, 0)))
+            left = np.pad(left, ((0, max(1, round(left.shape[0] / 3))), (0, 0), (0, 0)))
             self._control_bottom = left.shape[0]
             cv2.setMouseCallback(
                 self.window_left, self._on_front_mouse
@@ -1936,8 +1937,8 @@ class DualCompressedViewer(Node):
 
             return
 
-        combo = compose(left, right, self.overlay.rear_scale)
-        combo = np.pad(combo, ((0, 240), (0, 0), (0, 0)))
+        combo = compose(left, right, 0.5)
+        combo = np.pad(combo, ((0, max(1, round(left.shape[0] / 3))), (0, 0), (0, 0)))
         # IMPORTANT:
         # Check whether the window was closed BEFORE imshow().
         # Calling imshow() first would recreate a closed window.
@@ -1962,22 +1963,20 @@ class DualCompressedViewer(Node):
 
             self._window_sized = True
 
-        original_combo_h, original_combo_w = combo.shape[:2]
+        original_combo_h = combo.shape[0]
 
+        combo = display_sized_image(combo, self.combined_window)
         if self.telemetry:
-            original_h, original_w = combo.shape[:2]
-            combo = display_sized_image(combo, self.combined_window)
             fh, fw = left.shape[:2]
-            panel_x = round(fw * combo.shape[1] / original_w)
-            panel_top = round(fh * self.overlay.rear_scale
-                              * combo.shape[0] / original_h)
+            panel_x = round(fw * combo.shape[0] / original_combo_h)
+            panel_top = round(fh * 0.5 * combo.shape[0] / original_combo_h)
             self._draw_dashboard(combo, panel_x, panel_top)
 
         # OpenCV mouse coordinates refer to the displayed image.
         # Convert the front-camera region using the composite scale.
         native_front_w, native_front_h = self.front_native_size
         self.front_display_size = (
-            round(native_front_w * combo.shape[1] / original_combo_w),
+            round(native_front_w * combo.shape[0] / original_combo_h),
             round(native_front_h * combo.shape[0] / original_combo_h)
         )
         self._control_bottom = combo.shape[0]

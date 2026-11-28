@@ -285,7 +285,7 @@ def test_viewer_composites_camera_and_dashboard_and_checks_tf(monkeypatch):
         node.on_right(msg)
         node.draw()
         maximize.assert_called_once_with(node.combined_window)
-        assert images[-1].shape == (720, 960, 3)
+        assert images[-1].shape == (640, 960, 3)
         assert np.any(images[-1][240:, 640:] != 0)
         assert node.left_msg_count == node.right_msg_count == 1
 
@@ -318,7 +318,7 @@ def test_viewer_composites_camera_and_dashboard_and_checks_tf(monkeypatch):
         images.clear()
         node.draw()
         assert [img.shape for img in images] == [
-            (720, 640, 3), (480, 320, 3)]
+            (640, 640, 3), (480, 320, 3)]
     finally:
         node.destroy_node()
         rclpy.shutdown()
@@ -344,8 +344,9 @@ def test_upscaled_dashboard_and_mouse_hitboxes(monkeypatch):
         node.last_left = node.last_right = image
         node.telemetry.put('pose_odom', (1.0, 2.0, 0.5))
         node.draw()
-        assert images[-1].shape == (720, 720, 3)
-        assert node._panel.shape == (540, 240, 3)
+        assert images[-1].shape == (720, 1080, 3)
+        assert node.front_display_size == (720, 540)
+        assert node._panel.shape == (450, 360, 3)
         x0, y0, x1, y1 = node._panel_hits['reset']
         assert np.any(node._panel[y0:y1, x0:x1] != (35, 35, 35))
         px, py = node._panel_origin
@@ -356,8 +357,44 @@ def test_upscaled_dashboard_and_mouse_hitboxes(monkeypatch):
                             lambda name: (0, 0, 720, 360))
         node.last_draw_time = 0
         node.draw()
-        assert images[-1].shape == (480, 480, 3)
-        assert node._panel.shape == (360, 160, 3)
+        assert images[-1].shape == (360, 540, 3)
+        assert node.front_display_size == (360, 270)
+        assert node._panel.shape == (225, 180, 3)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize(('window', 'expected_shape', 'front_size', 'panel_shape'), [
+    ((1854, 1011), (1011, 1516), (1011, 758), (632, 505)),
+    ((900, 1200), (600, 900), (600, 450), (375, 300)),
+    ((480, 320), (320, 480), (320, 240), (200, 160)),
+])
+def test_composite_fits_window_with_fixed_camera_relative_geometry(
+        monkeypatch, window, expected_shape, front_size, panel_shape):
+    images = []
+    monkeypatch.setattr(dual_compressed_viewer, 'maximize_window', lambda name: True)
+    monkeypatch.setattr(cv2, 'namedWindow', lambda *args: None)
+    monkeypatch.setattr(cv2, 'setMouseCallback', lambda *args: None)
+    monkeypatch.setattr(cv2, 'getWindowProperty', lambda *args: 1)
+    monkeypatch.setattr(cv2, 'getWindowImageRect', lambda name: (0, 0, *window))
+    monkeypatch.setattr(cv2, 'resizeWindow', lambda *args: None)
+    monkeypatch.setattr(cv2, 'imshow', lambda name, image: images.append(image.copy()))
+    monkeypatch.setattr(cv2, 'waitKey', lambda *args: -1)
+    monkeypatch.setattr(cv2, 'destroyAllWindows', lambda: None)
+    rclpy.init()
+    node = DualCompressedViewer()
+    try:
+        node.last_left = np.full((480, 640, 3), 100, dtype=np.uint8)
+        node.last_right = np.full((480, 640, 3), 200, dtype=np.uint8)
+        node.draw()
+        assert images[-1].shape[:2] == expected_shape
+        assert node.front_display_size == front_size
+        assert node._panel.shape[:2] == panel_shape
+        assert node._panel_origin == (front_size[0], expected_shape[0] - panel_shape[0])
+        assert abs(node._panel_origin[1] - front_size[1] / 2) <= 1
+        assert abs(panel_shape[1] - front_size[0] / 2) <= 1
+        assert abs((expected_shape[0] - front_size[1]) / expected_shape[0] - 0.25) < 0.002
     finally:
         node.destroy_node()
         rclpy.shutdown()

@@ -364,6 +364,7 @@ def test_draw_in_both_window_modes_preserves_markers_and_mouse_setup(monkeypatch
     monkeypatch.setattr(cv2, 'imshow', lambda name, image: shown.setdefault(name, image.copy()))
     monkeypatch.setattr(cv2, 'setMouseCallback', Mock())
     monkeypatch.setattr(cv2, 'getWindowProperty', lambda *args: 1)
+    monkeypatch.setattr(cv2, 'getWindowImageRect', lambda *args: (0, 0, 0, 0))
     monkeypatch.setattr(cv2, 'waitKey', lambda *args: 255)
     state = LidarState(LidarConfig())
     state.put(LidarReading(1.0, 0.5, None, 1.0, False),

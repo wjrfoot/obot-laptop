@@ -12,7 +12,7 @@ from rclpy.action import ActionClient
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool
 
-from .camera_controls import fit_text, push_button
+from .camera_controls import control_metrics, fit_text, push_button
 
 
 MODE_NAMES = ('circle', 'square', 'triangle')
@@ -314,12 +314,9 @@ def draw_spray_panel(canvas, panel, snapshot: SpraySnapshot, available=True):
     """Draw the spray controls and return panel and button hitboxes."""
     x0, y0, x1, y1 = panel
     w, h = x1 - x0, y1 - y0
-    if w < 100 or h < 150:
+    if w < 90 or h < 75:
         return None, {}
-    margin = max(4, round(w * 0.025))
-    gap = max(3, margin // 2)
-    header = max(24, round(h * 0.14))
-    button_h = max(24, round(h * 0.16))
+    margin, gap, header, button_h = control_metrics(w, h)
     fit_text(canvas, 'SPRAY ' + snapshot.state,
              (x0 + margin, y0, x1 - margin, y0 + header))
     hits = {}
